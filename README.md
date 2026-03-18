@@ -32,8 +32,8 @@ A aplicação permite gerenciar a ordem das turmas diariamente, garantindo que c
 - 👨‍💼 **Direção:** Jair  
 - 👨‍🏫 **Orientador:** Laercio  
 - 💻 **Back-end:** Pierre  
-- 🗄️ **Banco de Dados:** Marcelo  
-- 🎨 **Front-end:** Aluno do 3º ano 
+- 🗄️ **Banco de Dados:** Marcelo/Jose wendson 
+- 🎨 **Front-end:** Paulo
 
 ---
 
@@ -49,9 +49,9 @@ A aplicação permite gerenciar a ordem das turmas diariamente, garantindo que c
 
 📂 fotos
 └── Armazenamento de imagens
-   📂 ano
-    └── 📂 turma
-         └──📂 [nome]
+📂 ano
+📂 turma
+📂 [nome]
 
 
 
