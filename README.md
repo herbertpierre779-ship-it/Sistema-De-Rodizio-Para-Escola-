@@ -49,9 +49,13 @@ A aplicação permite gerenciar a ordem das turmas diariamente, garantindo que c
 
 📂 fotos
 └── Armazenamento de imagens
+
 📂 ano
+
 📂 turma
+
 📂 [nome]
+
 
 
 
