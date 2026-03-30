@@ -6,6 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.entities import MealType, SchoolYear
 from app.schemas.meal_entries import MealEntryResponse
+from app.schemas.settings import RegistrationCaptureMode
 
 
 class StudentResponse(BaseModel):
@@ -41,6 +42,25 @@ class FaceEnrollResponse(BaseModel):
     student: StudentResponse
     engine: str
     enrolled_at: datetime
+
+
+class StudentFaceAssetItem(BaseModel):
+    filename: str
+    url: str
+
+
+class StudentFaceAssetsResponse(BaseModel):
+    student_id: str
+    full_name: str
+    cpf: str
+    class_id: str
+    school_year: SchoolYear
+    mode_hint: RegistrationCaptureMode
+    samples_count: int
+    front_url: str | None
+    right_url: str | None
+    left_url: str | None
+    sample_urls: list[StudentFaceAssetItem]
 
 
 class AttendanceTotalsResponse(BaseModel):

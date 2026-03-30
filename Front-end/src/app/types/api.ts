@@ -64,6 +64,25 @@ export type FaceEnrollResponse = {
   enrolled_at: string;
 };
 
+export type StudentFaceAssetItem = {
+  filename: string;
+  url: string;
+};
+
+export type StudentFaceAssetsResponse = {
+  student_id: string;
+  full_name: string;
+  cpf: string;
+  class_id: string;
+  school_year: SchoolYear;
+  mode_hint: RegistrationCaptureMode;
+  samples_count: number;
+  front_url: string | null;
+  right_url: string | null;
+  left_url: string | null;
+  sample_urls: StudentFaceAssetItem[];
+};
+
 export type RecognitionStudent = {
   id: string;
   full_name: string;

@@ -328,6 +328,33 @@ def test_identify_by_cpf_flow(client: TestClient) -> None:
     assert duplicate_payload["already_recorded_today"] is True
     assert "almo" in duplicate_payload["already_recorded_message"].lower()
 
+    sem_found = client.post(
+        "/recognition/identify-by-cpf",
+        headers=auth_headers(token),
+        json={"cpf": student_cpf, "meal_type": "sem_rodizio"},
+    )
+    assert sem_found.status_code == 200, sem_found.text
+    sem_found_payload = sem_found.json()
+    assert sem_found_payload["status"] == "low_confidence"
+    assert sem_found_payload["student"]["id"] == student_id
+
+    sem_entry = client.post(
+        "/meal-entries",
+        headers=auth_headers(token),
+        json={"student_id": student_id, "meal_type": "sem_rodizio", "source": "manual"},
+    )
+    assert sem_entry.status_code == 201, sem_entry.text
+
+    sem_duplicate = client.post(
+        "/recognition/identify-by-cpf",
+        headers=auth_headers(token),
+        json={"cpf": student_cpf, "meal_type": "sem_rodizio"},
+    )
+    assert sem_duplicate.status_code == 200, sem_duplicate.text
+    sem_duplicate_payload = sem_duplicate.json()
+    assert sem_duplicate_payload["already_recorded_today"] is True
+    assert "sem" in sem_duplicate_payload["already_recorded_message"].lower()
+
     not_found = client.post(
         "/recognition/identify-by-cpf",
         headers=auth_headers(token),
@@ -975,6 +1002,182 @@ def test_face_enroll_uses_hundred_samples_and_keeps_last_source_path(
     expected_last = photos_root / "2 ano" / "cem" / "aluno-cem-fotos" / "cycle-04-025.jpg"
     assert expected_first.exists()
     assert expected_last.exists()
+
+
+def test_face_assets_and_face_reenroll_three_photos_replace_only_facial_data(
+    client: TestClient, photos_root: Path, database_file: Path
+) -> None:
+    token = login(client, "diretor", "123456")
+    class_response = create_class(client, token, name="Rec", school_year="1 ano")
+    student_response = client.post(
+        "/students",
+        headers=auth_headers(token),
+        json={"full_name": "Aluno Recaptura Tres", "class_id": class_response["id"], "cpf": build_valid_cpf(61)},
+    )
+    assert student_response.status_code == 201, student_response.text
+    student_id = student_response.json()["id"]
+
+    for filename, payload in (
+        ("face-front.jpg", b"vector:1,0,0"),
+        ("face-right.jpg", b"vector:0,1,0"),
+        ("face-left.jpg", b"vector:0,0,1"),
+    ):
+        enroll = client.post(
+            f"/students/{student_id}/face-enroll",
+            headers=auth_headers(token),
+            files={"file": (filename, payload, "text/plain")},
+        )
+        assert enroll.status_code == 200, enroll.text
+
+    initial_assets = client.get(f"/students/{student_id}/face-assets", headers=auth_headers(token))
+    assert initial_assets.status_code == 200, initial_assets.text
+    initial_payload = initial_assets.json()
+    assert initial_payload["mode_hint"] == "three_photos"
+    assert initial_payload["samples_count"] == 3
+    assert initial_payload["front_url"] is not None
+    assert initial_payload["right_url"] is not None
+    assert initial_payload["left_url"] is not None
+    assert initial_payload["sample_urls"] == []
+    assert initial_payload["cpf"] == build_valid_cpf(61)
+
+    meal_entry = client.post(
+        "/meal-entries",
+        headers=auth_headers(token),
+        json={"student_id": student_id, "meal_type": "almoco", "source": "manual"},
+    )
+    assert meal_entry.status_code == 201, meal_entry.text
+
+    invalid_reenroll = client.post(
+        f"/students/{student_id}/face-reenroll",
+        headers=auth_headers(token),
+        data={"mode": "three_photos"},
+        files=[
+            ("files", ("face-front.jpg", b"vector:1,0,0", "text/plain")),
+            ("files", ("face-right.jpg", b"vector:0,1,0", "text/plain")),
+        ],
+    )
+    assert invalid_reenroll.status_code == 400
+
+    reenroll = client.post(
+        f"/students/{student_id}/face-reenroll",
+        headers=auth_headers(token),
+        data={"mode": "three_photos"},
+        files=[
+            ("files", ("face-front.jpg", b"vector:0,1,0", "text/plain")),
+            ("files", ("face-right.jpg", b"vector:0,1,0", "text/plain")),
+            ("files", ("face-left.jpg", b"vector:0,1,0", "text/plain")),
+        ],
+    )
+    assert reenroll.status_code == 200, reenroll.text
+
+    identify = client.post(
+        "/recognition/identify",
+        headers=auth_headers(token),
+        files={"file": ("identify.txt", b"vector:0,1,0", "text/plain")},
+    )
+    assert identify.status_code == 200, identify.text
+    assert identify.json()["status"] == "success"
+    assert identify.json()["student"]["id"] == student_id
+
+    with sqlite3.connect(database_file) as connection:
+        row = connection.execute(
+            """
+            SELECT samples_count, source_image_path
+            FROM face_embeddings
+            WHERE student_id = ?
+            """,
+            (int(student_id),),
+        ).fetchone()
+    assert row is not None
+    assert row[0] == 3
+    assert row[1] == "1 ano/rec/aluno-recaptura-tres/left.jpg"
+
+    entries_after = client.get("/meal-entries", headers=auth_headers(token))
+    assert entries_after.status_code == 200, entries_after.text
+    assert len(entries_after.json()) == 1
+    assert entries_after.json()[0]["student_id"] == student_id
+
+    front = photos_root / "1 ano" / "rec" / "aluno-recaptura-tres" / "front.jpg"
+    right = photos_root / "1 ano" / "rec" / "aluno-recaptura-tres" / "right.jpg"
+    left = photos_root / "1 ano" / "rec" / "aluno-recaptura-tres" / "left.jpg"
+    assert front.exists()
+    assert right.exists()
+    assert left.exists()
+
+
+def test_face_reenroll_hundred_photos_replaces_three_photos_set(
+    client: TestClient, photos_root: Path, database_file: Path
+) -> None:
+    token = login(client, "diretor", "123456")
+    class_response = create_class(client, token, name="R100", school_year="2 ano")
+    student_response = client.post(
+        "/students",
+        headers=auth_headers(token),
+        json={"full_name": "Aluno Recaptura Cem", "class_id": class_response["id"], "cpf": build_valid_cpf(62)},
+    )
+    assert student_response.status_code == 201, student_response.text
+    student_id = student_response.json()["id"]
+
+    for filename, payload in (
+        ("face-front.jpg", b"vector:1,0,0"),
+        ("face-right.jpg", b"vector:0,1,0"),
+        ("face-left.jpg", b"vector:0,0,1"),
+    ):
+        enroll = client.post(
+            f"/students/{student_id}/face-enroll",
+            headers=auth_headers(token),
+            files={"file": (filename, payload, "text/plain")},
+        )
+        assert enroll.status_code == 200, enroll.text
+
+    files_payload = []
+    for cycle in range(1, 5):
+        for index in range(1, 26):
+            files_payload.append(
+                (
+                    "files",
+                    (f"cycle-{cycle:02d}-{index:03d}.jpg", b"vector:1,0,0", "text/plain"),
+                )
+            )
+
+    reenroll = client.post(
+        f"/students/{student_id}/face-reenroll",
+        headers=auth_headers(token),
+        data={"mode": "hundred_photos"},
+        files=files_payload,
+    )
+    assert reenroll.status_code == 200, reenroll.text
+
+    with sqlite3.connect(database_file) as connection:
+        row = connection.execute(
+            """
+            SELECT samples_count, source_image_path
+            FROM face_embeddings
+            WHERE student_id = ?
+            """,
+            (int(student_id),),
+        ).fetchone()
+    assert row is not None
+    assert int(row[0]) == 100
+    assert row[1] == "2 ano/r100/aluno-recaptura-cem/cycle-04-025.jpg"
+
+    assets = client.get(f"/students/{student_id}/face-assets", headers=auth_headers(token))
+    assert assets.status_code == 200, assets.text
+    assets_payload = assets.json()
+    assert assets_payload["mode_hint"] == "hundred_photos"
+    assert assets_payload["samples_count"] == 100
+    assert assets_payload["right_url"] is None
+    assert assets_payload["left_url"] is None
+    assert len(assets_payload["sample_urls"]) == 100
+
+    cycle_first = photos_root / "2 ano" / "r100" / "aluno-recaptura-cem" / "cycle-01-001.jpg"
+    cycle_last = photos_root / "2 ano" / "r100" / "aluno-recaptura-cem" / "cycle-04-025.jpg"
+    old_right = photos_root / "2 ano" / "r100" / "aluno-recaptura-cem" / "right.jpg"
+    old_left = photos_root / "2 ano" / "r100" / "aluno-recaptura-cem" / "left.jpg"
+    assert cycle_first.exists()
+    assert cycle_last.exists()
+    assert not old_right.exists()
+    assert not old_left.exists()
 
 
 def test_legacy_media_migration_moves_to_name_folder_and_duplicates_sides(

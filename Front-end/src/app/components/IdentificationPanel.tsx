@@ -269,6 +269,26 @@ export default function IdentificationPanel() {
       Boolean(response.student) && (response.status === "success" || response.status === "low_confidence");
 
     if (!matchedStudent) {
+      const shouldOpenResultForCpf =
+        response.status === "not_found" ||
+        response.status === "no_face_detected" ||
+        response.status === "multiple_faces_detected";
+
+      if (shouldOpenResultForCpf) {
+        void emit("recognition.not_found", {
+          dedupeKey: `sem-rodizio-result-${response.status}-${response.message}`,
+        });
+        setCompactReview(null);
+        setCompactReviewError("");
+        setResult(response);
+        setErrorMessage("");
+        setStatusMessage(response.message);
+        setStep("result");
+        setIsCameraEnabled(false);
+        setIsCpfValidatedResult(false);
+        return;
+      }
+
       showToast(toastToneForRecognition(response), getRecognitionLabel(response.status), response.message, {
         eventId: "recognition.not_found",
         payload: {
@@ -511,6 +531,21 @@ export default function IdentificationPanel() {
         return;
       }
 
+      if (selectedMealType === "sem_rodizio") {
+        setResult(null);
+        setErrorMessage("");
+        setStatusMessage("");
+        setStep("camera");
+        setIsCameraEnabled(false);
+        setCompactReview({
+          result: cpfResponse,
+          alreadyRecorded: cpfResponse.already_recorded_today,
+        });
+        setCompactReviewError("");
+        setIsCpfValidatedResult(false);
+        return;
+      }
+
       setOperatorOverrideAccepted(false);
       setErrorMessage("");
       setStatusMessage(cpfResponse.message);
@@ -656,6 +691,7 @@ export default function IdentificationPanel() {
           errorMessage={compactReviewError}
           onConfirm={handleCompactReviewConfirm}
           onReject={handleCompactReviewReject}
+          onValidateCpf={handleOpenCpfModal}
         />
       )}
       {showCpfModal && (
@@ -951,12 +987,14 @@ function CompactReviewModal({
   errorMessage,
   onConfirm,
   onReject,
+  onValidateCpf,
 }: {
   review: NonNullable<CompactReviewState>;
   isSubmitting: boolean;
   errorMessage: string;
   onConfirm: () => void;
   onReject: () => void;
+  onValidateCpf: () => void;
 }) {
   const student = review.result.student;
 
@@ -1034,6 +1072,13 @@ function CompactReviewModal({
             className="flex-1 rounded-2xl border border-slate-200 bg-slate-100 px-5 py-4 font-semibold text-slate-700 transition hover:bg-slate-200"
           >
             Não é essa pessoa
+          </button>
+          <button
+            type="button"
+            onClick={onValidateCpf}
+            className="flex-1 rounded-2xl border border-orange-200 bg-orange-50 px-5 py-4 font-semibold text-orange-700 transition hover:bg-orange-100"
+          >
+            Validar com CPF
           </button>
           <button
             type="button"

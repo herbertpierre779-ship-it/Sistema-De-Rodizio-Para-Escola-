@@ -74,11 +74,11 @@ function buildRecognitionResult(overrides: Partial<RecognitionResult>): Recognit
   };
 }
 
-async function goToResultScreen() {
+async function goToResultScreen(mealButtonName: RegExp = /almo/i) {
   await waitFor(() => {
-    expect(screen.getByRole("button", { name: /almo/i })).toBeTruthy();
+    expect(screen.getByRole("button", { name: mealButtonName })).toBeTruthy();
   });
-  fireEvent.click(screen.getByRole("button", { name: /almo/i }));
+  fireEvent.click(screen.getByRole("button", { name: mealButtonName }));
   fireEvent.click(screen.getByRole("button", { name: /abrir c/i }));
   fireEvent.click(screen.getByRole("button", { name: /capturar mock/i }));
   await screen.findByRole("button", { name: /validar com cpf/i });
@@ -169,6 +169,80 @@ describe("IdentificationPanel", () => {
     await waitFor(() => {
       expect(screen.getByRole("button", { name: /capturar mock/i })).toBeTruthy();
     });
+  });
+
+  it("sem rodizio com falha facial abre resultado e permite validar com CPF para revisao rapida", async () => {
+    identifyMock.mockResolvedValueOnce(
+      buildRecognitionResult({
+        status: "no_face_detected",
+        message: "Nenhum rosto detectado na imagem enviada.",
+        meal_type: "sem_rodizio",
+      }),
+    );
+
+    identifyByCpfMock.mockResolvedValueOnce(
+      buildRecognitionResult({
+        status: "low_confidence",
+        matched: true,
+        meal_type: "sem_rodizio",
+        message: "Aluno localizado por CPF. Conferencia manual obrigatoria.",
+        student: {
+          id: "student-sem-cpf",
+          full_name: "JOAO SEM RODIZIO",
+          class_id: "class-2",
+          class_name: "B",
+          class_display_name: "2 ano - B",
+          school_year: "2 ano",
+          photo_url: null,
+        },
+      }),
+    );
+
+    render(<IdentificationPanel />);
+    await goToResultScreen(/sem rod/i);
+
+    fireEvent.click(screen.getByRole("button", { name: /validar com cpf/i }));
+    fireEvent.change(screen.getByLabelText(/cpf do aluno/i), { target: { value: "529.982.247-25" } });
+    fireEvent.click(screen.getByRole("button", { name: /validar cpf/i }));
+
+    await waitFor(() => {
+      expect(screen.getByText(/confirmar valida/i)).toBeTruthy();
+    });
+    expect(screen.getByText("JOAO SEM RODIZIO")).toBeTruthy();
+  });
+
+  it("mostra Validar com CPF no modal compacto de sem rodizio", async () => {
+    identifyMock.mockResolvedValueOnce(
+      buildRecognitionResult({
+        status: "low_confidence",
+        matched: true,
+        meal_type: "sem_rodizio",
+        message: "Correspondencia com baixa confianca.",
+        student: {
+          id: "student-sem-compact",
+          full_name: "ANA COMPACTA",
+          class_id: "class-3",
+          class_name: "C",
+          class_display_name: "3 ano - C",
+          school_year: "3 ano",
+          photo_url: null,
+        },
+      }),
+    );
+
+    render(<IdentificationPanel />);
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /sem rod/i })).toBeTruthy();
+    });
+    fireEvent.click(screen.getByRole("button", { name: /sem rod/i }));
+    fireEvent.click(screen.getByRole("button", { name: /abrir c/i }));
+    fireEvent.click(screen.getByRole("button", { name: /capturar mock/i }));
+
+    await waitFor(() => {
+      expect(screen.getByText("ANA COMPACTA")).toBeTruthy();
+    });
+    fireEvent.click(screen.getByRole("button", { name: /validar com cpf/i }));
+    expect(screen.getByText(/valide a entrada com o cpf/i)).toBeTruthy();
   });
 
   it("nao renderiza botoes de refeicao enquanto horarios carregam", async () => {

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, File, Query, Response, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, Query, Response, UploadFile, status
 
 from app.api.dependencies import get_container, get_current_user, require_module_permission
 from app.core.container import AppContainer
 from app.models.entities import UserRecord
+from app.schemas.settings import RegistrationCaptureMode
 from app.schemas.students import (
     FaceEnrollResponse,
+    StudentFaceAssetsResponse,
     StudentAttendanceSummaryResponse,
     StudentCreateRequest,
     StudentResponse,
@@ -86,3 +88,31 @@ async def enroll_face(
         content_type=file.content_type,
         filename=file.filename,
     )
+
+
+@router.get("/{student_id}/face-assets", response_model=StudentFaceAssetsResponse)
+def get_student_face_assets(
+    student_id: str,
+    _: UserRecord = Depends(require_module_permission("cadastro_aluno")),
+    container: AppContainer = Depends(get_container),
+) -> StudentFaceAssetsResponse:
+    return container.student_service.get_face_assets(student_id)
+
+
+@router.post("/{student_id}/face-reenroll", response_model=FaceEnrollResponse)
+async def reenroll_face_batch(
+    student_id: str,
+    mode: RegistrationCaptureMode = Form(...),
+    files: list[UploadFile] = File(...),
+    _: UserRecord = Depends(require_module_permission("cadastro_aluno")),
+    container: AppContainer = Depends(get_container),
+) -> FaceEnrollResponse:
+    payloads = [
+        {
+            "image_bytes": await file.read(),
+            "content_type": file.content_type,
+            "filename": file.filename,
+        }
+        for file in files
+    ]
+    return container.student_service.reenroll_face_batch(student_id=student_id, mode=mode, files=payloads)

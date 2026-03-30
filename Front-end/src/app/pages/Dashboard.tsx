@@ -23,7 +23,7 @@ import UserManagementPanel from "../components/UserManagementPanel";
 import { useAuth } from "../hooks/useAuth";
 import { useFeedback } from "../hooks/useFeedback";
 import { dashboardMenuItems, getRoleLabel } from "../lib/constants";
-import { hasAnyConfigurationAccess } from "../lib/permissions";
+import { EMPTY_PERMISSION_MAP, hasAnyConfigurationAccess } from "../lib/permissions";
 import type { PermissionMap, UserRole } from "../types/api";
 
 type MenuItemId = "inicio" | "identificacao" | "cadastro" | "turmas" | "estatisticas" | "configuracao";
@@ -122,21 +122,22 @@ export default function Dashboard() {
   const [activeMenuItem, setActiveMenuItem] = useState<MenuItemId>("inicio");
   const [configurationView, setConfigurationView] = useState<ConfigurationView>("root");
   const [showExitConfirm, setShowExitConfirm] = useState(false);
+  const permissionsForUi = isLoadingPermissions ? EMPTY_PERMISSION_MAP : effectivePermissions;
 
   useEffect(() => {
     if (!user || isLoadingPermissions) {
       return;
     }
 
-    if (!canAccessMenuItem(activeMenuItem, user.role, effectivePermissions)) {
+    if (!canAccessMenuItem(activeMenuItem, user.role, permissionsForUi)) {
       setActiveMenuItem("inicio");
       return;
     }
 
-    if (configurationView === "usuarios" && !Boolean(effectivePermissions?.config_usuarios)) {
+    if (configurationView === "usuarios" && !Boolean(permissionsForUi?.config_usuarios)) {
       setConfigurationView("root");
     }
-  }, [activeMenuItem, configurationView, effectivePermissions, isLoadingPermissions, user]);
+  }, [activeMenuItem, configurationView, isLoadingPermissions, permissionsForUi, user]);
 
   useEffect(() => {
     if (activeMenuItem !== "configuracao" && configurationView !== "root") {
@@ -156,11 +157,11 @@ export default function Dashboard() {
 
   const menuItems = useMemo(
     () =>
-      dashboardMenuItems(user?.role ?? "funcionario", effectivePermissions).map((item) => ({
+      dashboardMenuItems(user?.role ?? "funcionario", permissionsForUi).map((item) => ({
         ...item,
         icon: iconById[item.id as MenuItemId] ?? Home,
       })),
-    [effectivePermissions, user?.role],
+    [permissionsForUi, user?.role],
   );
 
   const quickActions = useMemo<QuickAction[]>(() => {
@@ -173,7 +174,7 @@ export default function Dashboard() {
       actions.push(action);
     };
 
-    if (canAccessMenuItem("identificacao", user.role, effectivePermissions)) {
+    if (canAccessMenuItem("identificacao", user.role, permissionsForUi)) {
       pushAction({
         id: "identificacao",
         title: "Começar",
@@ -181,7 +182,7 @@ export default function Dashboard() {
       });
     }
 
-    if (canAccessMenuItem("cadastro", user.role, effectivePermissions)) {
+    if (canAccessMenuItem("cadastro", user.role, permissionsForUi)) {
       pushAction({
         id: "cadastro",
         title: "Cadastro aluno",
@@ -189,7 +190,7 @@ export default function Dashboard() {
       });
     }
 
-    if (canAccessMenuItem("turmas", user.role, effectivePermissions)) {
+    if (canAccessMenuItem("turmas", user.role, permissionsForUi)) {
       pushAction({
         id: "turmas",
         title: "Turmas",
@@ -197,7 +198,7 @@ export default function Dashboard() {
       });
     }
 
-    if (canAccessMenuItem("estatisticas", user.role, effectivePermissions)) {
+    if (canAccessMenuItem("estatisticas", user.role, permissionsForUi)) {
       pushAction({
         id: "estatisticas",
         title: "Estatísticas",
@@ -205,7 +206,7 @@ export default function Dashboard() {
       });
     }
 
-    if (canAccessMenuItem("configuracao", user.role, effectivePermissions)) {
+    if (canAccessMenuItem("configuracao", user.role, permissionsForUi)) {
       pushAction({
         id: "configuracao",
         title: "Configuração",
@@ -214,7 +215,7 @@ export default function Dashboard() {
     }
 
     return actions;
-  }, [effectivePermissions, user]);
+  }, [permissionsForUi, user]);
 
   const handleMenuNavigation = (target: MenuItemId) => {
     setActiveMenuItem(target);
@@ -236,7 +237,7 @@ export default function Dashboard() {
           onLogout={() => setShowExitConfirm(true)}
           role={user.role}
           fullName={user.full_name}
-          permissions={effectivePermissions}
+          permissions={permissionsForUi}
         />
 
         <main className="flex-1">
@@ -251,7 +252,7 @@ export default function Dashboard() {
               activeMenuItem={activeMenuItem}
               quickActions={quickActions}
               userRole={user.role}
-              permissions={effectivePermissions}
+              permissions={permissionsForUi}
               configurationView={configurationView}
               onNavigate={handleMenuNavigation}
               onOpenConfigurationUsers={() => setConfigurationView("usuarios")}
@@ -301,7 +302,7 @@ export default function Dashboard() {
               activeMenuItem={activeMenuItem}
               quickActions={quickActions}
               userRole={user.role}
-              permissions={effectivePermissions}
+              permissions={permissionsForUi}
               configurationView={configurationView}
               onNavigate={handleMenuNavigation}
               onOpenConfigurationUsers={() => setConfigurationView("usuarios")}

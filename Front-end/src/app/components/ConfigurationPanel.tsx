@@ -161,44 +161,6 @@ export default function ConfigurationPanel({ role, permissions, onOpenUsers }: C
     return permissionsSettings.user_overrides[selectedUserOverrideId] ?? {};
   }, [permissionsSettings, selectedUserOverrideId]);
 
-  useEffect(() => {
-    if (!selectedUserOverrideId || !selectedUserProfile) {
-      return;
-    }
-
-    setPermissionsSettings((current) => {
-      if (!current) {
-        return current;
-      }
-
-      const currentOverride = current.user_overrides[selectedUserOverrideId] ?? {};
-      const hydratedOverride = PERMISSION_MODULE_ORDER.reduce<Record<PermissionModule, boolean>>((acc, moduleName) => {
-        const maybeOverride = currentOverride[moduleName];
-        if (typeof maybeOverride === "boolean") {
-          acc[moduleName] = maybeOverride;
-        } else {
-          acc[moduleName] = Boolean(current.profiles[selectedUserProfile][moduleName]);
-        }
-        return acc;
-      }, {} as Record<PermissionModule, boolean>);
-
-      const isAlreadyHydrated = PERMISSION_MODULE_ORDER.every(
-        (moduleName) => typeof currentOverride[moduleName] === "boolean",
-      );
-      if (isAlreadyHydrated) {
-        return current;
-      }
-
-      return {
-        ...current,
-        user_overrides: {
-          ...current.user_overrides,
-          [selectedUserOverrideId]: hydratedOverride,
-        },
-      };
-    });
-  }, [selectedUserOverrideId, selectedUserProfile]);
-
   const handleModeChange = async (nextMode: RegistrationCaptureMode) => {
     if (!token || !canEditCaptureMode || isSavingMode) {
       return;
@@ -328,23 +290,36 @@ export default function ConfigurationPanel({ role, permissions, onOpenUsers }: C
   };
 
   const handleUserOverrideToggle = (moduleName: PermissionModule, nextValue: boolean) => {
-    if (!selectedUserOverrideId) {
+    if (!selectedUserOverrideId || !selectedUserProfile) {
       return;
     }
     setPermissionsSettings((current) => {
       if (!current) {
         return current;
       }
+      const profileValue = Boolean(current.profiles[selectedUserProfile][moduleName]);
       const currentOverride = current.user_overrides[selectedUserOverrideId] ?? {};
+      const nextOverride: Partial<Record<PermissionModule, boolean>> = { ...currentOverride };
+
+      if (nextValue === profileValue) {
+        delete nextOverride[moduleName];
+      } else {
+        nextOverride[moduleName] = nextValue;
+      }
+
+      const hasAnyOverride = PERMISSION_MODULE_ORDER.some(
+        (permissionModule) => typeof nextOverride[permissionModule] === "boolean",
+      );
+      const nextUserOverrides = { ...current.user_overrides };
+      if (hasAnyOverride) {
+        nextUserOverrides[selectedUserOverrideId] = nextOverride;
+      } else {
+        delete nextUserOverrides[selectedUserOverrideId];
+      }
+
       return {
         ...current,
-        user_overrides: {
-          ...current.user_overrides,
-          [selectedUserOverrideId]: {
-            ...currentOverride,
-            [moduleName]: nextValue,
-          },
-        },
+        user_overrides: nextUserOverrides,
       };
     });
   };
@@ -374,17 +349,11 @@ export default function ConfigurationPanel({ role, permissions, onOpenUsers }: C
       if (!current) {
         return current;
       }
-      const profilePermissions = PERMISSION_MODULE_ORDER.reduce<Record<PermissionModule, boolean>>((acc, moduleName) => {
-        acc[moduleName] = Boolean(current.profiles[selectedUserProfile][moduleName]);
-        return acc;
-      }, {} as Record<PermissionModule, boolean>);
-
+      const nextOverrides = { ...current.user_overrides };
+      delete nextOverrides[selectedUserOverrideId];
       return {
         ...current,
-        user_overrides: {
-          ...current.user_overrides,
-          [selectedUserOverrideId]: profilePermissions,
-        },
+        user_overrides: nextOverrides,
       };
     });
   };
@@ -632,7 +601,11 @@ export default function ConfigurationPanel({ role, permissions, onOpenUsers }: C
               {selectedUserOverrideId && selectedUserProfile ? (
                 <div className="mt-3 space-y-2.5">
                   {PERMISSION_MODULE_ORDER.map((moduleName) => {
-                    const effectiveValue = Boolean(selectedUserOverrides[moduleName]);
+                    const overrideValue = selectedUserOverrides[moduleName];
+                    const effectiveValue =
+                      typeof overrideValue === "boolean"
+                        ? overrideValue
+                        : Boolean(permissionsSettings.profiles[selectedUserProfile][moduleName]);
 
                     return (
                       <label

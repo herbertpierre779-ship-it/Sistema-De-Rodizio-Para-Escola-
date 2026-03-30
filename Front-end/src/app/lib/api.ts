@@ -15,6 +15,7 @@ import type {
   StatsCharts,
   StatsOverview,
   StudentAttendanceSummary,
+  StudentFaceAssetsResponse,
   StudentItem,
   UserRole,
 } from "../types/api";
@@ -73,7 +74,7 @@ async function apiRequest<T>(path: string, options: RequestOptions = {}): Promis
   });
 
   if (!response.ok) {
-    let message = "Não foi possível concluir a solicitação.";
+    let message = "Nao foi possivel concluir a solicitacao.";
     try {
       const data = (await response.json()) as { detail?: string };
       if (data.detail) {
@@ -142,6 +143,25 @@ export const studentsApi = {
     const formData = new FormData();
     formData.append("file", file);
     return apiRequest<FaceEnrollResponse>(`/students/${studentId}/face-enroll`, {
+      method: "POST",
+      token,
+      body: formData,
+      isFormData: true,
+    });
+  },
+  getFaceAssets: (token: string, studentId: string) =>
+    apiRequest<StudentFaceAssetsResponse>(`/students/${studentId}/face-assets`, { token }),
+  reenrollFace: (
+    token: string,
+    studentId: string,
+    payload: { mode: RegistrationCaptureMode; files: File[] },
+  ) => {
+    const formData = new FormData();
+    formData.append("mode", payload.mode);
+    payload.files.forEach((file) => {
+      formData.append("files", file);
+    });
+    return apiRequest<FaceEnrollResponse>(`/students/${studentId}/face-reenroll`, {
       method: "POST",
       token,
       body: formData,

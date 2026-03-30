@@ -179,4 +179,30 @@ describe("ConfigurationPanel role visibility", () => {
     expect(screen.queryByText(/hor[aá]rios das refei[çc][õo]es/i)).toBeNull();
     expect(screen.queryByText(/modo de captura no cadastro/i)).toBeNull();
   });
+
+  it("nao cria override automaticamente ao apenas abrir excecao por usuario", async () => {
+    renderPanel("diretor", {
+      ...basePermissions,
+      config_permissoes: true,
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText(/configura.*de permis/i)).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /abrir configura/i }));
+
+    await waitFor(() => {
+      expect(screen.getByText(/exce.*por usu/i)).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /salvar permis/i }));
+
+    await waitFor(() => {
+      expect(setPermissionsMock).toHaveBeenCalledTimes(1);
+    });
+
+    const payload = setPermissionsMock.mock.calls[0]?.[1];
+    expect(payload?.user_overrides).toEqual({});
+  });
 });

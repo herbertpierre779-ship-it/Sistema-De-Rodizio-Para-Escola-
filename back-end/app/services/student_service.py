@@ -5,7 +5,7 @@ import time
 from collections import defaultdict
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal
+from typing import Literal, TypedDict
 
 from app.adapters.face.engine import BaseFaceEngine
 from app.core.clock import school_today, to_school_datetime
@@ -14,6 +14,7 @@ from app.core.cpf import is_valid_cpf, normalize_cpf
 from app.core.exceptions import AppError
 from app.core.media import build_media_url, build_photo_relative_path, build_student_media_directory, slugify_segment
 from app.models.entities import ClassRecord, FaceEmbeddingRecord, MealType, RecognitionStatus, StudentRecord
+from app.schemas.settings import RegistrationCaptureMode
 from app.repositories.contracts import (
     AppSettingsRepository,
     ClassRepository,
@@ -27,6 +28,8 @@ from app.schemas.students import (
     AttendanceCalendarDayResponse,
     AttendanceTotalsResponse,
     FaceEnrollResponse,
+    StudentFaceAssetItem,
+    StudentFaceAssetsResponse,
     StudentAttendanceSummaryResponse,
     StudentCreateRequest,
     StudentResponse,
@@ -36,6 +39,18 @@ from app.services.meal_entry_service import MealEntryService
 
 CaptureKind = Literal["front", "right", "left", "sample", "unknown"]
 LEGACY_MEDIA_MIGRATION_KEY = "legacy_media_migration_v1_done"
+
+
+class ReenrollFilePayload(TypedDict):
+    image_bytes: bytes
+    content_type: str | None
+    filename: str | None
+
+
+class ReenrollVectorPayload(TypedDict):
+    image_bytes: bytes
+    engine: str
+    vector: list[float]
 
 
 class StudentService:
@@ -84,6 +99,88 @@ class StudentService:
 
     def get_student(self, student_id: str) -> StudentResponse:
         return self.to_response(self.get_student_record(student_id))
+
+    def get_face_assets(self, student_id: str) -> StudentFaceAssetsResponse:
+        student = self.get_student_record(student_id)
+        class_record = self._ensure_class_exists(student.class_id)
+        student = self._ensure_student_media_folder(student, class_record)
+        embedding = self.face_embedding_repository.get_by_student_id(student.id)
+        sample_assets = self._list_cycle_sample_assets(class_record, student)
+        samples_count = embedding.samples_count if embedding else len(sample_assets)
+        mode_hint: RegistrationCaptureMode = "hundred_photos" if samples_count >= 100 else "three_photos"
+
+        return StudentFaceAssetsResponse(
+            student_id=student.id,
+            full_name=student.full_name,
+            cpf=student.cpf,
+            class_id=student.class_id,
+            school_year=class_record.school_year,
+            mode_hint=mode_hint,
+            samples_count=samples_count,
+            front_url=build_media_url(student.photo_path),
+            right_url=build_media_url(student.photo_right_path),
+            left_url=build_media_url(student.photo_left_path),
+            sample_urls=sample_assets,
+        )
+
+    def reenroll_face_batch(
+        self,
+        *,
+        student_id: str,
+        mode: RegistrationCaptureMode,
+        files: list[ReenrollFilePayload],
+    ) -> FaceEnrollResponse:
+        student = self.get_student_record(student_id)
+        class_record = self._ensure_class_exists(student.class_id)
+        student = self._ensure_student_media_folder(student, class_record)
+        expected_count = 100 if mode == "hundred_photos" else 3
+        received_count = len(files)
+        if received_count != expected_count:
+            raise AppError(
+                400,
+                f"Quantidade invalida para recaptura: esperado {expected_count} arquivo(s), recebido {received_count}.",
+            )
+
+        extracted = self._extract_reenroll_vectors(mode=mode, files=files)
+        now = datetime.now(UTC)
+
+        self.face_embedding_repository.delete_by_student_id(student_id)
+        self._delete_student_media_directory(student)
+        self._delete_photo(student.photo_path)
+        self._delete_photo(student.photo_right_path)
+        self._delete_photo(student.photo_left_path)
+
+        saved_paths: list[str] = []
+        vectors: list[list[float]] = []
+        for index, payload in enumerate(extracted):
+            filename = self._resolve_reenroll_filename(mode=mode, index=index)
+            saved_path = self._save_named_photo(student, class_record, payload["image_bytes"], filename)
+            saved_paths.append(saved_path)
+            vectors.append(payload["vector"])
+
+        if not saved_paths:
+            raise AppError(400, "Nenhuma foto valida foi enviada para recaptura.")
+
+        student_updates: dict[str, object] = {
+            "photo_path": saved_paths[0],
+            "photo_right_path": saved_paths[1] if mode == "three_photos" else None,
+            "photo_left_path": saved_paths[2] if mode == "three_photos" else None,
+            "updated_at": now,
+        }
+        updated_student = self.student_repository.update(student.model_copy(update=student_updates))
+
+        averaged_vector = self._average_vectors(vectors)
+        embedding = FaceEmbeddingRecord(
+            student_id=student_id,
+            engine=extracted[-1]["engine"],
+            vector=averaged_vector,
+            samples_count=expected_count,
+            source_image_path=saved_paths[-1],
+            created_at=now,
+            updated_at=now,
+        )
+        self.face_embedding_repository.upsert(embedding)
+        return FaceEnrollResponse(student=self.to_response(updated_student), engine=embedding.engine, enrolled_at=now)
 
     def get_attendance_summary(
         self,
@@ -400,6 +497,105 @@ class StudentService:
                         }
                     )
                 )
+
+    def _list_cycle_sample_assets(
+        self,
+        class_record: ClassRecord,
+        student: StudentRecord,
+    ) -> list[StudentFaceAssetItem]:
+        if not student.media_folder:
+            return []
+
+        media_dir_relative = build_student_media_directory(class_record, student.media_folder)
+        media_dir_absolute = self.settings.photos_root_path / media_dir_relative
+        if not media_dir_absolute.exists() or not media_dir_absolute.is_dir():
+            return []
+
+        assets: list[StudentFaceAssetItem] = []
+        for item in sorted(media_dir_absolute.glob("cycle-*.jpg")):
+            if not item.is_file():
+                continue
+            filename = item.name
+            stem = Path(filename).stem.casefold()
+            if not stem.startswith("cycle-"):
+                continue
+            relative = (Path(media_dir_relative) / filename).as_posix()
+            url = build_media_url(relative)
+            if not url:
+                continue
+            assets.append(StudentFaceAssetItem(filename=filename, url=url))
+        return assets
+
+    def _extract_reenroll_vectors(
+        self,
+        *,
+        mode: RegistrationCaptureMode,
+        files: list[ReenrollFilePayload],
+    ) -> list[ReenrollVectorPayload]:
+        extracted: list[ReenrollVectorPayload] = []
+        expected_length: int | None = None
+
+        for index, payload in enumerate(files):
+            extraction = self.face_engine.extract_embedding(payload["image_bytes"])
+            if extraction.status != RecognitionStatus.success or not extraction.vector:
+                raise AppError(
+                    400,
+                    f"Falha na {self._reenroll_position_label(mode, index)}: {extraction.message}",
+                )
+
+            if expected_length is None:
+                expected_length = len(extraction.vector)
+            elif len(extraction.vector) != expected_length:
+                raise AppError(
+                    400,
+                    f"Falha na {self._reenroll_position_label(mode, index)}: dimensao de embedding inconsistente.",
+                )
+
+            extracted.append(
+                ReenrollVectorPayload(
+                    image_bytes=payload["image_bytes"],
+                    engine=extraction.engine,
+                    vector=extraction.vector,
+                )
+            )
+        return extracted
+
+    @staticmethod
+    def _resolve_reenroll_filename(*, mode: RegistrationCaptureMode, index: int) -> str:
+        if mode == "three_photos":
+            if index == 0:
+                return "front.jpg"
+            if index == 1:
+                return "right.jpg"
+            return "left.jpg"
+
+        cycle = (index // 25) + 1
+        position = (index % 25) + 1
+        return f"cycle-{cycle:02d}-{position:03d}.jpg"
+
+    @staticmethod
+    def _average_vectors(vectors: list[list[float]]) -> list[float]:
+        if not vectors:
+            return []
+        vector_size = len(vectors[0])
+        totals = [0.0] * vector_size
+        for vector in vectors:
+            for index, value in enumerate(vector):
+                totals[index] += value
+        count = float(len(vectors))
+        return [value / count for value in totals]
+
+    @staticmethod
+    def _reenroll_position_label(mode: RegistrationCaptureMode, index: int) -> str:
+        if mode == "three_photos":
+            labels = ["foto 1/3 (frente)", "foto 2/3 (lado direito)", "foto 3/3 (lado esquerdo)"]
+            if 0 <= index < len(labels):
+                return labels[index]
+            return f"foto {index + 1}/3"
+
+        cycle = (index // 25) + 1
+        position = (index % 25) + 1
+        return f"foto {position}/25 do ciclo {cycle}"
 
     def _ensure_class_exists(self, class_id: str) -> ClassRecord:
         class_record = self.class_repository.get_by_id(class_id)
