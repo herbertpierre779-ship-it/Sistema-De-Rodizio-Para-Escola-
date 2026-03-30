@@ -1,19 +1,24 @@
 from __future__ import annotations
 
 from app.adapters.face.engine import build_face_engine
-from app.adapters.persistence.json_repositories import (
-    JsonClassRepository,
-    JsonFaceEmbeddingRepository,
+from app.adapters.persistence.json_collection_store import JsonCollectionStore
+from app.adapters.persistence.json_event_repositories import (
     JsonMealEntryRepository,
     JsonRecognitionAttemptRepository,
-    JsonStudentRepository,
-    JsonUserRepository,
+)
+from app.adapters.persistence.sqlite_repositories import (
+    SqliteAppSettingsRepository,
+    SqliteClassRepository,
+    SqliteFaceEmbeddingRepository,
+    SqliteStudentRepository,
+    SqliteUserRepository,
     StaticRoleRepository,
 )
-from app.adapters.persistence.json_store import JsonStore
+from app.adapters.persistence.sqlite_store import SqliteStore
 from app.core.config import Settings
 from app.models.entities import SchoolYear
 from app.services.auth_service import AuthService
+from app.services.app_settings_service import AppSettingsService
 from app.services.class_service import ClassService
 from app.services.meal_entry_service import MealEntryService
 from app.services.recognition_service import RecognitionService
@@ -29,26 +34,48 @@ class AppContainer:
         for school_year in SchoolYear:
             (self.settings.photos_root_path / school_year.value).mkdir(parents=True, exist_ok=True)
 
-        store = JsonStore(self.settings.data_file_path)
+        sqlite_store = SqliteStore(self.settings.database_file_path)
+        meal_entries_store = JsonCollectionStore(self.settings.meal_entries_file_path)
+        recognition_attempts_store = JsonCollectionStore(self.settings.recognition_attempts_file_path)
+
+        sqlite_store.migrate_legacy_json_if_needed(
+            self.settings.legacy_data_file_path,
+            meal_entries_store=meal_entries_store,
+            recognition_attempts_store=recognition_attempts_store,
+            keep_backup=self.settings.keep_legacy_backup,
+        )
+        sqlite_store.migrate_event_tables_to_json_if_needed(
+            meal_entries_store=meal_entries_store,
+            recognition_attempts_store=recognition_attempts_store,
+        )
+
         self.role_repository = StaticRoleRepository()
-        self.user_repository = JsonUserRepository(store)
-        self.class_repository = JsonClassRepository(store)
-        self.student_repository = JsonStudentRepository(store)
-        self.face_embedding_repository = JsonFaceEmbeddingRepository(store)
-        self.meal_entry_repository = JsonMealEntryRepository(store)
-        self.recognition_attempt_repository = JsonRecognitionAttemptRepository(store)
+        self.app_settings_repository = SqliteAppSettingsRepository(sqlite_store)
+        self.user_repository = SqliteUserRepository(sqlite_store)
+        self.class_repository = SqliteClassRepository(sqlite_store)
+        self.student_repository = SqliteStudentRepository(sqlite_store)
+        self.face_embedding_repository = SqliteFaceEmbeddingRepository(sqlite_store)
+        self.meal_entry_repository = JsonMealEntryRepository(meal_entries_store)
+        self.recognition_attempt_repository = JsonRecognitionAttemptRepository(recognition_attempts_store)
         self.face_engine = build_face_engine(self.settings.face_engine)
 
         self.user_service = UserService(self.user_repository, self.role_repository)
+        self.app_settings_service = AppSettingsService(
+            self.settings,
+            self.app_settings_repository,
+            self.user_repository,
+        )
         self.auth_service = AuthService(self.settings, self.user_repository)
         self.meal_entry_service = MealEntryService(
             self.settings,
+            self.app_settings_service,
             self.meal_entry_repository,
             self.student_repository,
             self.class_repository,
         )
         self.student_service = StudentService(
             self.settings,
+            self.app_settings_repository,
             self.student_repository,
             self.class_repository,
             self.face_embedding_repository,
@@ -68,6 +95,7 @@ class AppContainer:
             self.face_embedding_repository,
             self.recognition_attempt_repository,
             self.face_engine,
+            self.app_settings_service,
             self.meal_entry_service,
         )
         self.stats_service = StatsService(
@@ -86,3 +114,4 @@ class AppContainer:
             password=self.settings.bootstrap_director_password,
             full_name=self.settings.bootstrap_director_full_name,
         )
+        self.student_service.migrate_legacy_media_if_needed()

@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+import sqlite3
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from app.adapters.persistence.json_repositories import JsonUserRepository, StaticRoleRepository
-from app.adapters.persistence.json_store import JsonStore
+from app.adapters.persistence.json_collection_store import JsonCollectionStore
+from app.adapters.persistence.sqlite_repositories import SqliteUserRepository, StaticRoleRepository
+from app.adapters.persistence.sqlite_store import SqliteStore
 from app.core.config import Settings
 from app.core.security import hash_password, verify_password
 from app.models.entities import UserRecord, UserRole
@@ -37,6 +39,30 @@ def build_valid_cpf(seed: int) -> str:
     first_digit = _cpf_digit(first_nine, 10)
     second_digit = _cpf_digit(f"{first_nine}{first_digit}", 11)
     return f"{first_nine}{first_digit}{second_digit}"
+
+
+def _minutes_to_hhmm(total_minutes: int) -> str:
+    safe_minutes = max(0, min(1439, total_minutes))
+    hour = safe_minutes // 60
+    minute = safe_minutes % 60
+    return f"{hour:02d}:{minute:02d}"
+
+
+def build_window_outside_now() -> tuple[str, str]:
+    now = datetime.now(UTC) + timedelta(hours=-3)
+    current_minutes = now.hour * 60 + now.minute
+
+    if current_minutes <= 1410:
+        start = current_minutes + 20
+        end = start + 10
+        return _minutes_to_hhmm(start), _minutes_to_hhmm(end)
+
+    if current_minutes >= 30:
+        start = current_minutes - 30
+        end = start + 10
+        return _minutes_to_hhmm(start), _minutes_to_hhmm(end)
+
+    return "23:40", "23:50"
 
 
 def create_class(
@@ -122,6 +148,69 @@ def test_login_and_role_protection(client: TestClient) -> None:
 
     coordinator_users = client.get("/users", headers=auth_headers(coordinator_token))
     assert coordinator_users.status_code == 403
+
+
+def test_user_deactivation_blocks_active_sessions_and_prevents_self_deactivation(client: TestClient) -> None:
+    director_token = login(client, "diretor", "123456")
+
+    create_employee = client.post(
+        "/users",
+        headers=auth_headers(director_token),
+        json={
+            "username": "func_sessao",
+            "full_name": "Funcionario Sessao",
+            "password": "123456",
+            "role": "funcionario",
+            "is_active": True,
+        },
+    )
+    assert create_employee.status_code == 201, create_employee.text
+    employee_id = create_employee.json()["id"]
+    employee_token = login(client, "func_sessao", "123456")
+
+    deactivate_employee = client.patch(
+        f"/users/{employee_id}",
+        headers=auth_headers(director_token),
+        json={"is_active": False},
+    )
+    assert deactivate_employee.status_code == 200, deactivate_employee.text
+    assert deactivate_employee.json()["is_active"] is False
+
+    employee_me = client.get("/auth/me", headers=auth_headers(employee_token))
+    assert employee_me.status_code == 403
+    assert "inativo" in employee_me.json()["detail"].casefold()
+
+    employee_login_after_deactivation = client.post(
+        "/auth/login",
+        json={"username": "func_sessao", "password": "123456"},
+    )
+    assert employee_login_after_deactivation.status_code == 403
+    assert "inativo" in employee_login_after_deactivation.json()["detail"].casefold()
+
+    create_second_director = client.post(
+        "/users",
+        headers=auth_headers(director_token),
+        json={
+            "username": "diretor_b",
+            "full_name": "Diretor B",
+            "password": "123456",
+            "role": "diretor",
+            "is_active": True,
+        },
+    )
+    assert create_second_director.status_code == 201, create_second_director.text
+
+    director_me = client.get("/auth/me", headers=auth_headers(director_token))
+    assert director_me.status_code == 200, director_me.text
+    director_id = director_me.json()["id"]
+
+    self_deactivation_attempt = client.patch(
+        f"/users/{director_id}",
+        headers=auth_headers(director_token),
+        json={"is_active": False},
+    )
+    assert self_deactivation_attempt.status_code == 400
+    assert "desativar o próprio usuário" in self_deactivation_attempt.json()["detail"].casefold()
 
 
 def test_classes_and_students_crud(client: TestClient) -> None:
@@ -258,6 +347,441 @@ def test_identify_by_cpf_flow(client: TestClient) -> None:
     assert "cpf" in invalid_cpf.json()["detail"].casefold()
 
 
+def test_registration_capture_mode_settings(client: TestClient) -> None:
+    director_token = login(client, "diretor", "123456")
+
+    create_user = client.post(
+        "/users",
+        headers=auth_headers(director_token),
+        json={
+            "username": "func_mode",
+            "full_name": "Funcionario Modo",
+            "password": "123456",
+            "role": "funcionario",
+            "is_active": True,
+        },
+    )
+    assert create_user.status_code == 201, create_user.text
+    employee_token = login(client, "func_mode", "123456")
+
+    get_default = client.get("/settings/registration-capture-mode", headers=auth_headers(director_token))
+    assert get_default.status_code == 200
+    assert get_default.json()["mode"] == "hundred_photos"
+
+    employee_cannot_put = client.put(
+        "/settings/registration-capture-mode",
+        headers=auth_headers(employee_token),
+        json={"mode": "three_photos"},
+    )
+    assert employee_cannot_put.status_code == 403
+
+    director_put = client.put(
+        "/settings/registration-capture-mode",
+        headers=auth_headers(director_token),
+        json={"mode": "three_photos"},
+    )
+    assert director_put.status_code == 200
+    assert director_put.json()["mode"] == "three_photos"
+
+    get_updated = client.get("/settings/registration-capture-mode", headers=auth_headers(director_token))
+    assert get_updated.status_code == 200
+    assert get_updated.json()["mode"] == "three_photos"
+
+    invalid_mode = client.put(
+        "/settings/registration-capture-mode",
+        headers=auth_headers(director_token),
+        json={"mode": "invalid"},
+    )
+    assert invalid_mode.status_code == 422
+
+
+def test_meal_schedule_settings_defaults_and_update(client: TestClient) -> None:
+    director_token = login(client, "diretor", "123456")
+
+    create_employee_user = client.post(
+        "/users",
+        headers=auth_headers(director_token),
+        json={
+            "username": "func_schedule",
+            "full_name": "Funcionario Schedule",
+            "password": "123456",
+            "role": "funcionario",
+            "is_active": True,
+        },
+    )
+    assert create_employee_user.status_code == 201, create_employee_user.text
+    employee_token = login(client, "func_schedule", "123456")
+
+    create_coordinator_user = client.post(
+        "/users",
+        headers=auth_headers(director_token),
+        json={
+            "username": "coord_schedule",
+            "full_name": "Coordenadora Schedule",
+            "password": "123456",
+            "role": "coordenadora",
+            "is_active": True,
+        },
+    )
+    assert create_coordinator_user.status_code == 201, create_coordinator_user.text
+    coordinator_token = login(client, "coord_schedule", "123456")
+
+    default_response = client.get("/settings/meal-schedule", headers=auth_headers(director_token))
+    assert default_response.status_code == 200, default_response.text
+    default_payload = default_response.json()
+    assert default_payload["profiles"] == ["funcionario", "coordenadora"]
+    assert default_payload["meals"]["almoco"]["enabled"] is True
+    assert default_payload["meals"]["almoco"]["windows"] == [{"start": "12:20", "end": "14:20"}]
+    assert default_payload["meals"]["merenda"]["enabled"] is True
+    assert default_payload["meals"]["merenda"]["windows"] == [{"start": "10:00", "end": "10:20"}]
+    assert default_payload["meals"]["sem_rodizio"]["enabled"] is False
+    assert default_payload["meals"]["sem_rodizio"]["windows"] == []
+
+    employee_put = client.put(
+        "/settings/meal-schedule",
+        headers=auth_headers(employee_token),
+        json=default_payload,
+    )
+    assert employee_put.status_code == 403
+
+    updated_payload = {
+        "profiles": ["funcionario"],
+        "meals": {
+            "almoco": {"enabled": True, "windows": [{"start": "12:00", "end": "13:30"}]},
+            "merenda": {"enabled": True, "windows": [{"start": "09:40", "end": "10:10"}]},
+            "sem_rodizio": {"enabled": True, "windows": [{"start": "07:00", "end": "07:30"}]},
+        },
+    }
+    coordinator_put = client.put(
+        "/settings/meal-schedule",
+        headers=auth_headers(coordinator_token),
+        json=updated_payload,
+    )
+    assert coordinator_put.status_code == 200, coordinator_put.text
+    assert coordinator_put.json()["profiles"] == ["funcionario", "coordenadora"]
+
+    normalize_profiles_put = client.put(
+        "/settings/meal-schedule",
+        headers=auth_headers(director_token),
+        json={
+            "profiles": [],
+            "meals": updated_payload["meals"],
+        },
+    )
+    assert normalize_profiles_put.status_code == 200, normalize_profiles_put.text
+    assert normalize_profiles_put.json()["profiles"] == ["funcionario", "coordenadora"]
+
+    overlap_payload = {
+        "profiles": ["funcionario"],
+        "meals": {
+            "almoco": {
+                "enabled": True,
+                "windows": [
+                    {"start": "12:00", "end": "13:00"},
+                    {"start": "12:30", "end": "13:10"},
+                ],
+            },
+            "merenda": {"enabled": True, "windows": [{"start": "09:40", "end": "10:10"}]},
+            "sem_rodizio": {"enabled": False, "windows": []},
+        },
+    }
+    overlap_response = client.put(
+        "/settings/meal-schedule",
+        headers=auth_headers(director_token),
+        json=overlap_payload,
+    )
+    assert overlap_response.status_code == 400
+    assert "sobrepos" in overlap_response.json()["detail"].casefold()
+
+    invalid_interval_payload = {
+        "profiles": ["funcionario"],
+        "meals": {
+            "almoco": {"enabled": True, "windows": [{"start": "14:00", "end": "13:00"}]},
+            "merenda": {"enabled": True, "windows": [{"start": "09:40", "end": "10:10"}]},
+            "sem_rodizio": {"enabled": False, "windows": []},
+        },
+    }
+    invalid_interval_response = client.put(
+        "/settings/meal-schedule",
+        headers=auth_headers(director_token),
+        json=invalid_interval_payload,
+    )
+    assert invalid_interval_response.status_code == 400
+    assert "intervalo" in invalid_interval_response.json()["detail"].casefold()
+
+
+def test_meal_schedule_blocks_api_for_restricted_profiles(client: TestClient) -> None:
+    director_token = login(client, "diretor", "123456")
+    class_response = create_class(client, director_token, name="Horario", school_year="1 ano")
+    cpf_value = build_valid_cpf(321)
+
+    student_response = client.post(
+        "/students",
+        headers=auth_headers(director_token),
+        json={"full_name": "Aluno Horario", "class_id": class_response["id"], "cpf": cpf_value},
+    )
+    assert student_response.status_code == 201, student_response.text
+    student_id = student_response.json()["id"]
+
+    create_user = client.post(
+        "/users",
+        headers=auth_headers(director_token),
+        json={
+            "username": "func_bloq",
+            "full_name": "Funcionario Bloqueio",
+            "password": "123456",
+            "role": "funcionario",
+            "is_active": True,
+        },
+    )
+    assert create_user.status_code == 201, create_user.text
+    employee_token = login(client, "func_bloq", "123456")
+
+    blocked_start, blocked_end = build_window_outside_now()
+    block_payload = {
+        "profiles": ["funcionario", "coordenadora"],
+        "meals": {
+            "almoco": {"enabled": True, "windows": [{"start": blocked_start, "end": blocked_end}]},
+            "merenda": {"enabled": True, "windows": [{"start": blocked_start, "end": blocked_end}]},
+            "sem_rodizio": {"enabled": True, "windows": [{"start": blocked_start, "end": blocked_end}]},
+        },
+    }
+    update_schedule = client.put(
+        "/settings/meal-schedule",
+        headers=auth_headers(director_token),
+        json=block_payload,
+    )
+    assert update_schedule.status_code == 200, update_schedule.text
+
+    blocked_identify = client.post(
+        "/recognition/identify",
+        headers=auth_headers(employee_token),
+        files={"file": ("identify.txt", b"vector:1,0", "text/plain")},
+        data={"meal_type": "almoco"},
+    )
+    assert blocked_identify.status_code == 403
+
+    blocked_identify_by_cpf = client.post(
+        "/recognition/identify-by-cpf",
+        headers=auth_headers(employee_token),
+        json={"cpf": cpf_value, "meal_type": "almoco"},
+    )
+    assert blocked_identify_by_cpf.status_code == 403
+
+    blocked_meal_entry = client.post(
+        "/meal-entries",
+        headers=auth_headers(employee_token),
+        json={"student_id": student_id, "meal_type": "almoco", "source": "manual"},
+    )
+    assert blocked_meal_entry.status_code == 403
+
+    director_allowed = client.post(
+        "/recognition/identify",
+        headers=auth_headers(director_token),
+        files={"file": ("identify.txt", b"vector:1,0", "text/plain")},
+        data={"meal_type": "almoco"},
+    )
+    assert director_allowed.status_code == 200
+
+    director_allowed_by_cpf = client.post(
+        "/recognition/identify-by-cpf",
+        headers=auth_headers(director_token),
+        json={"cpf": cpf_value, "meal_type": "almoco"},
+    )
+    assert director_allowed_by_cpf.status_code == 200
+
+    director_allowed_meal_entry = client.post(
+        "/meal-entries",
+        headers=auth_headers(director_token),
+        json={"student_id": student_id, "meal_type": "almoco", "source": "manual"},
+    )
+    assert director_allowed_meal_entry.status_code == 201
+
+
+def test_permissions_settings_and_effective_resolution(client: TestClient) -> None:
+    director_token = login(client, "diretor", "123456")
+    director_me = client.get("/auth/me", headers=auth_headers(director_token))
+    assert director_me.status_code == 200
+    director_id = director_me.json()["id"]
+
+    create_coordinator = client.post(
+        "/users",
+        headers=auth_headers(director_token),
+        json={
+            "username": "coord_perm",
+            "full_name": "Coordenadora Permissao",
+            "password": "123456",
+            "role": "coordenadora",
+            "is_active": True,
+        },
+    )
+    assert create_coordinator.status_code == 201, create_coordinator.text
+    coordinator_id = create_coordinator.json()["id"]
+    coordinator_token = login(client, "coord_perm", "123456")
+
+    create_employee = client.post(
+        "/users",
+        headers=auth_headers(director_token),
+        json={
+            "username": "func_perm",
+            "full_name": "Funcionario Permissao",
+            "password": "123456",
+            "role": "funcionario",
+            "is_active": True,
+        },
+    )
+    assert create_employee.status_code == 201, create_employee.text
+    _ = create_employee.json()["id"]
+
+    get_default_settings = client.get("/settings/permissions", headers=auth_headers(director_token))
+    assert get_default_settings.status_code == 200, get_default_settings.text
+    default_settings = get_default_settings.json()
+    assert default_settings["profiles"]["coordenadora"]["operacao"] is True
+    assert default_settings["profiles"]["funcionario"]["cadastro_aluno"] is True
+
+    coordinator_cannot_get_matrix = client.get("/settings/permissions", headers=auth_headers(coordinator_token))
+    assert coordinator_cannot_get_matrix.status_code == 403
+
+    coordinator_effective_before = client.get(
+        "/settings/permissions/effective",
+        headers=auth_headers(coordinator_token),
+    )
+    assert coordinator_effective_before.status_code == 200, coordinator_effective_before.text
+    assert coordinator_effective_before.json()["modules"]["operacao"] is True
+    assert coordinator_effective_before.json()["modules"]["config_usuarios"] is False
+
+    updated_settings = json.loads(json.dumps(default_settings))
+    updated_settings["profiles"]["coordenadora"]["operacao"] = False
+    updated_settings["profiles"]["coordenadora"]["estatisticas"] = False
+    updated_settings["profiles"]["funcionario"]["cadastro_aluno"] = False
+    updated_settings["user_overrides"] = {
+        coordinator_id: {"operacao": True, "estatisticas": True},
+        director_id: {"config_usuarios": False},
+        "999999": {"operacao": True},
+    }
+
+    put_settings = client.put(
+        "/settings/permissions",
+        headers=auth_headers(director_token),
+        json=updated_settings,
+    )
+    assert put_settings.status_code == 200, put_settings.text
+    saved_settings = put_settings.json()
+    assert coordinator_id in saved_settings["user_overrides"]
+    assert director_id not in saved_settings["user_overrides"]
+    assert "999999" not in saved_settings["user_overrides"]
+
+    coordinator_effective_after = client.get(
+        "/settings/permissions/effective",
+        headers=auth_headers(coordinator_token),
+    )
+    assert coordinator_effective_after.status_code == 200, coordinator_effective_after.text
+    modules_after = coordinator_effective_after.json()["modules"]
+    assert modules_after["operacao"] is True
+    assert modules_after["estatisticas"] is True
+    assert modules_after["criar_turma"] is True
+
+    director_effective = client.get("/settings/permissions/effective", headers=auth_headers(director_token))
+    assert director_effective.status_code == 200, director_effective.text
+    assert all(bool(value) for value in director_effective.json()["modules"].values())
+
+
+def test_permissions_module_enforcement_and_user_override(client: TestClient) -> None:
+    director_token = login(client, "diretor", "123456")
+
+    create_coordinator = client.post(
+        "/users",
+        headers=auth_headers(director_token),
+        json={
+            "username": "coord_override",
+            "full_name": "Coordenadora Override",
+            "password": "123456",
+            "role": "coordenadora",
+            "is_active": True,
+        },
+    )
+    assert create_coordinator.status_code == 201, create_coordinator.text
+    coordinator_id = create_coordinator.json()["id"]
+    coordinator_token = login(client, "coord_override", "123456")
+
+    get_settings = client.get("/settings/permissions", headers=auth_headers(director_token))
+    assert get_settings.status_code == 200, get_settings.text
+    permissions_payload = get_settings.json()
+    permissions_payload["profiles"]["coordenadora"]["criar_turma"] = False
+    permissions_payload["profiles"]["coordenadora"]["config_horarios_refeicoes"] = False
+    permissions_payload["profiles"]["coordenadora"]["config_usuarios"] = False
+    permissions_payload["user_overrides"] = {}
+
+    save_restricted = client.put(
+        "/settings/permissions",
+        headers=auth_headers(director_token),
+        json=permissions_payload,
+    )
+    assert save_restricted.status_code == 200, save_restricted.text
+
+    blocked_create_class = client.post(
+        "/classes",
+        headers=auth_headers(coordinator_token),
+        json={"name": "BLOQ", "school_year": "1 ano"},
+    )
+    assert blocked_create_class.status_code == 403
+
+    blocked_update_schedule = client.put(
+        "/settings/meal-schedule",
+        headers=auth_headers(coordinator_token),
+        json={
+            "profiles": ["funcionario", "coordenadora"],
+            "meals": {
+                "almoco": {"enabled": True, "windows": [{"start": "12:20", "end": "14:20"}]},
+                "merenda": {"enabled": True, "windows": [{"start": "10:00", "end": "10:20"}]},
+                "sem_rodizio": {"enabled": False, "windows": []},
+            },
+        },
+    )
+    assert blocked_update_schedule.status_code == 403
+
+    blocked_users_access = client.get("/users", headers=auth_headers(coordinator_token))
+    assert blocked_users_access.status_code == 403
+
+    permissions_payload["user_overrides"] = {
+        coordinator_id: {
+            "criar_turma": True,
+            "config_horarios_refeicoes": True,
+            "config_usuarios": True,
+        }
+    }
+    save_override = client.put(
+        "/settings/permissions",
+        headers=auth_headers(director_token),
+        json=permissions_payload,
+    )
+    assert save_override.status_code == 200, save_override.text
+
+    allowed_users_access = client.get("/users", headers=auth_headers(coordinator_token))
+    assert allowed_users_access.status_code == 200, allowed_users_access.text
+
+    allowed_create_class = client.post(
+        "/classes",
+        headers=auth_headers(coordinator_token),
+        json={"name": "LIB", "school_year": "2 ano"},
+    )
+    assert allowed_create_class.status_code == 201, allowed_create_class.text
+
+    allowed_update_schedule = client.put(
+        "/settings/meal-schedule",
+        headers=auth_headers(coordinator_token),
+        json={
+            "profiles": ["funcionario", "coordenadora"],
+            "meals": {
+                "almoco": {"enabled": True, "windows": [{"start": "12:20", "end": "14:20"}]},
+                "merenda": {"enabled": True, "windows": [{"start": "10:00", "end": "10:20"}]},
+                "sem_rodizio": {"enabled": False, "windows": []},
+            },
+        },
+    )
+    assert allowed_update_schedule.status_code == 200, allowed_update_schedule.text
+
+
 def test_face_enrollment_and_identification_statuses(client: TestClient, photos_root: Path) -> None:
     token = login(client, "diretor", "123456")
 
@@ -279,9 +803,9 @@ def test_face_enrollment_and_identification_statuses(client: TestClient, photos_
     assert enrolled_student["has_face_enrolled"] is True
     assert enrolled_student["class_display_name"] == "1 ano - A"
     assert enrolled_student["school_year"] == "1 ano"
-    assert enrolled_student["photo_url"] == f"/media/1%20ano/a/{student_id}.jpg"
+    assert enrolled_student["photo_url"] == "/media/1%20ano/a/aluno-face/front.jpg"
 
-    expected_photo_path = photos_root / "1 ano" / "a" / f"{student_id}.jpg"
+    expected_photo_path = photos_root / "1 ano" / "a" / "aluno-face" / "front.jpg"
     assert expected_photo_path.exists()
 
     update_enroll = client.post(
@@ -332,7 +856,7 @@ def test_face_enrollment_and_identification_statuses(client: TestClient, photos_
 
 
 def test_face_enroll_uses_three_samples_for_embedding_average(
-    client: TestClient, tmp_path: Path, photos_root: Path
+    client: TestClient, photos_root: Path, database_file: Path
 ) -> None:
     token = login(client, "diretor", "123456")
 
@@ -366,9 +890,9 @@ def test_face_enroll_uses_three_samples_for_embedding_average(
     )
     assert third_enroll.status_code == 200, third_enroll.text
 
-    primary_photo_path = photos_root / "1 ano" / "m" / f"{student_id}.jpg"
-    right_photo_path = photos_root / "1 ano" / "m" / f"{student_id}-right.jpg"
-    left_photo_path = photos_root / "1 ano" / "m" / f"{student_id}-left.jpg"
+    primary_photo_path = photos_root / "1 ano" / "m" / "aluno-multi-foto" / "front.jpg"
+    right_photo_path = photos_root / "1 ano" / "m" / "aluno-multi-foto" / "right.jpg"
+    left_photo_path = photos_root / "1 ano" / "m" / "aluno-multi-foto" / "left.jpg"
     assert primary_photo_path.exists()
     assert right_photo_path.exists()
     assert left_photo_path.exists()
@@ -386,14 +910,158 @@ def test_face_enroll_uses_three_samples_for_embedding_average(
     assert identify_payload["status"] == "success"
     assert identify_payload["student"]["id"] == student_id
 
-    store_payload = json.loads((tmp_path / "dev_store.json").read_text(encoding="utf-8"))
-    embeddings = store_payload["face_embeddings"]
-    assert len(embeddings) == 1
-    assert embeddings[0]["student_id"] == student_id
-    assert embeddings[0]["samples_count"] == 3
-    assert embeddings[0]["source_image_path"] == f"1 ano/m/{student_id}-left.jpg"
-    assert len(embeddings[0]["vector"]) == 128
-    assert all(value == pytest.approx(1 / 3, rel=1e-3, abs=1e-3) for value in embeddings[0]["vector"][:3])
+    with sqlite3.connect(database_file) as connection:
+        row = connection.execute(
+            """
+            SELECT student_id, samples_count, source_image_path, vector_json
+            FROM face_embeddings
+            """
+        ).fetchone()
+
+    assert row is not None
+    assert str(row[0]) == student_id
+    assert row[1] == 3
+    assert row[2] == "1 ano/m/aluno-multi-foto/left.jpg"
+    vector = json.loads(row[3])
+    assert len(vector) == 128
+    assert all(value == pytest.approx(1 / 3, rel=1e-3, abs=1e-3) for value in vector[:3])
+
+
+def test_face_enroll_uses_hundred_samples_and_keeps_last_source_path(
+    client: TestClient, photos_root: Path, database_file: Path
+) -> None:
+    token = login(client, "diretor", "123456")
+    class_response = create_class(client, token, name="Cem", school_year="2 ano")
+    student_response = client.post(
+        "/students",
+        headers=auth_headers(token),
+        json={"full_name": "Aluno Cem Fotos", "class_id": class_response["id"], "cpf": build_valid_cpf(55)},
+    )
+    assert student_response.status_code == 201, student_response.text
+    student_id = student_response.json()["id"]
+
+    for cycle in range(1, 5):
+        for index in range(1, 26):
+            filename = f"cycle-{cycle:02d}-{index:03d}.jpg"
+            enroll = client.post(
+                f"/students/{student_id}/face-enroll",
+                headers=auth_headers(token),
+                files={"file": (filename, b"vector:1,0,0", "text/plain")},
+            )
+            assert enroll.status_code == 200, enroll.text
+
+    identify = client.post(
+        "/recognition/identify",
+        headers=auth_headers(token),
+        files={"file": ("identify.txt", b"vector:1,0,0", "text/plain")},
+    )
+    assert identify.status_code == 200, identify.text
+    assert identify.json()["status"] == "success"
+    assert identify.json()["student"]["id"] == student_id
+
+    with sqlite3.connect(database_file) as connection:
+        row = connection.execute(
+            """
+            SELECT student_id, samples_count, source_image_path
+            FROM face_embeddings
+            """
+        ).fetchone()
+    assert row is not None
+    assert str(row[0]) == student_id
+    assert int(row[1]) == 100
+    assert row[2] == "2 ano/cem/aluno-cem-fotos/cycle-04-025.jpg"
+
+    expected_first = photos_root / "2 ano" / "cem" / "aluno-cem-fotos" / "cycle-01-001.jpg"
+    expected_last = photos_root / "2 ano" / "cem" / "aluno-cem-fotos" / "cycle-04-025.jpg"
+    assert expected_first.exists()
+    assert expected_last.exists()
+
+
+def test_legacy_media_migration_moves_to_name_folder_and_duplicates_sides(
+    client: TestClient, photos_root: Path
+) -> None:
+    token = login(client, "diretor", "123456")
+    class_response = create_class(client, token, name="Mig", school_year="1 ano")
+    student_response = client.post(
+        "/students",
+        headers=auth_headers(token),
+        json={"full_name": "Aluno Legado Midia", "class_id": class_response["id"], "cpf": build_valid_cpf(56)},
+    )
+    assert student_response.status_code == 201, student_response.text
+    student_id = student_response.json()["id"]
+
+    enroll = client.post(
+        f"/students/{student_id}/face-enroll",
+        headers=auth_headers(token),
+        files={"file": ("face-front.jpg", b"vector:1,0,0", "text/plain")},
+    )
+    assert enroll.status_code == 200, enroll.text
+
+    container = client.app.state.container
+    student_repo = container.student_repository
+    class_repo = container.class_repository
+    embedding_repo = container.face_embedding_repository
+    settings_repo = container.app_settings_repository
+
+    student = student_repo.get_by_id(student_id)
+    assert student is not None
+    class_record = class_repo.get_by_id(student.class_id)
+    assert class_record is not None
+    assert student.photo_path is not None
+
+    legacy_relative_path = f"{class_record.school_year.value}/mig/{student_id}.jpg"
+    source_path = photos_root / student.photo_path
+    legacy_path = photos_root / legacy_relative_path
+    legacy_path.parent.mkdir(parents=True, exist_ok=True)
+    source_path.replace(legacy_path)
+
+    updated_student = student_repo.update(
+        student.model_copy(
+            update={
+                "media_folder": None,
+                "photo_path": legacy_relative_path,
+                "photo_right_path": None,
+                "photo_left_path": None,
+                "updated_at": datetime.now(UTC),
+            }
+        )
+    )
+    embedding = embedding_repo.get_by_student_id(student_id)
+    assert embedding is not None
+    embedding_repo.upsert(
+        embedding.model_copy(
+            update={
+                "source_image_path": legacy_relative_path,
+                "updated_at": datetime.now(UTC),
+            }
+        )
+    )
+
+    settings_repo.set_value("legacy_media_migration_v1_done", "pending")
+    container.student_service.migrate_legacy_media_if_needed()
+
+    migrated = student_repo.get_by_id(student_id)
+    assert migrated is not None
+    assert migrated.media_folder == "aluno-legado-midia"
+    assert migrated.photo_path == "1 ano/mig/aluno-legado-midia/front.jpg"
+    assert migrated.photo_right_path == "1 ano/mig/aluno-legado-midia/right.jpg"
+    assert migrated.photo_left_path == "1 ano/mig/aluno-legado-midia/left.jpg"
+    assert (photos_root / migrated.photo_path).exists()
+    assert (photos_root / migrated.photo_right_path).exists()
+    assert (photos_root / migrated.photo_left_path).exists()
+    assert (photos_root / migrated.photo_path).read_bytes() == (photos_root / migrated.photo_right_path).read_bytes()
+    assert (photos_root / migrated.photo_path).read_bytes() == (photos_root / migrated.photo_left_path).read_bytes()
+
+    migrated_embedding = embedding_repo.get_by_student_id(student_id)
+    assert migrated_embedding is not None
+    assert migrated_embedding.source_image_path == "1 ano/mig/aluno-legado-midia/front.jpg"
+
+    container.student_service.migrate_legacy_media_if_needed()
+    migrated_again = student_repo.get_by_id(student_id)
+    assert migrated_again is not None
+    assert migrated_again.photo_path == migrated.photo_path
+    assert migrated_again.photo_right_path == migrated.photo_right_path
+    assert migrated_again.photo_left_path == migrated.photo_left_path
 
 
 def test_face_enroll_unknown_pose_filename_uses_primary_fallback(client: TestClient, photos_root: Path) -> None:
@@ -413,9 +1081,9 @@ def test_face_enroll_unknown_pose_filename_uses_primary_fallback(client: TestCli
         files={"file": ("captura-sem-pose.txt", b"vector:1,0", "text/plain")},
     )
     assert enroll.status_code == 200, enroll.text
-    assert enroll.json()["student"]["photo_url"] == f"/media/1%20ano/q/{student_id}.jpg"
+    assert enroll.json()["student"]["photo_url"] == "/media/1%20ano/q/aluno-fallback/front.jpg"
 
-    primary_photo_path = photos_root / "1 ano" / "q" / f"{student_id}.jpg"
+    primary_photo_path = photos_root / "1 ano" / "q" / "aluno-fallback" / "front.jpg"
     assert primary_photo_path.exists()
     assert primary_photo_path.read_bytes() == b"vector:1,0"
 
@@ -445,9 +1113,9 @@ def test_update_student_moves_front_right_and_left_images(client: TestClient, ph
         )
         assert enroll.status_code == 200, enroll.text
 
-    original_front = photos_root / "1 ano" / "a" / f"{student_id}.jpg"
-    original_right = photos_root / "1 ano" / "a" / f"{student_id}-right.jpg"
-    original_left = photos_root / "1 ano" / "a" / f"{student_id}-left.jpg"
+    original_front = photos_root / "1 ano" / "a" / "aluno-mudanca-turma" / "front.jpg"
+    original_right = photos_root / "1 ano" / "a" / "aluno-mudanca-turma" / "right.jpg"
+    original_left = photos_root / "1 ano" / "a" / "aluno-mudanca-turma" / "left.jpg"
     assert original_front.exists()
     assert original_right.exists()
     assert original_left.exists()
@@ -458,11 +1126,11 @@ def test_update_student_moves_front_right_and_left_images(client: TestClient, ph
         json={"class_id": class_target["id"]},
     )
     assert update_response.status_code == 200, update_response.text
-    assert update_response.json()["photo_url"] == f"/media/1%20ano/b/{student_id}.jpg"
+    assert update_response.json()["photo_url"] == "/media/1%20ano/b/aluno-mudanca-turma/front.jpg"
 
-    moved_front = photos_root / "1 ano" / "b" / f"{student_id}.jpg"
-    moved_right = photos_root / "1 ano" / "b" / f"{student_id}-right.jpg"
-    moved_left = photos_root / "1 ano" / "b" / f"{student_id}-left.jpg"
+    moved_front = photos_root / "1 ano" / "b" / "aluno-mudanca-turma" / "front.jpg"
+    moved_right = photos_root / "1 ano" / "b" / "aluno-mudanca-turma" / "right.jpg"
+    moved_left = photos_root / "1 ano" / "b" / "aluno-mudanca-turma" / "left.jpg"
     assert moved_front.exists()
     assert moved_right.exists()
     assert moved_left.exists()
@@ -478,6 +1146,49 @@ def test_update_student_moves_front_right_and_left_images(client: TestClient, ph
     assert identify_after_move.status_code == 200, identify_after_move.text
     assert identify_after_move.json()["status"] == "success"
     assert identify_after_move.json()["student"]["id"] == student_id
+
+
+def test_students_with_same_name_get_media_folder_suffix(client: TestClient, photos_root: Path) -> None:
+    token = login(client, "diretor", "123456")
+    class_response = create_class(client, token, name="S", school_year="2 ano")
+
+    first_student = client.post(
+        "/students",
+        headers=auth_headers(token),
+        json={"full_name": "Nome Repetido", "class_id": class_response["id"], "cpf": build_valid_cpf(555)},
+    )
+    assert first_student.status_code == 201, first_student.text
+    first_id = first_student.json()["id"]
+
+    second_student = client.post(
+        "/students",
+        headers=auth_headers(token),
+        json={"full_name": "Nome Repetido", "class_id": class_response["id"], "cpf": build_valid_cpf(556)},
+    )
+    assert second_student.status_code == 201, second_student.text
+    second_id = second_student.json()["id"]
+
+    first_enroll = client.post(
+        f"/students/{first_id}/face-enroll",
+        headers=auth_headers(token),
+        files={"file": ("face-front.txt", b"vector:1,0,0", "text/plain")},
+    )
+    assert first_enroll.status_code == 200, first_enroll.text
+
+    second_enroll = client.post(
+        f"/students/{second_id}/face-enroll",
+        headers=auth_headers(token),
+        files={"file": ("face-front.txt", b"vector:0,1,0", "text/plain")},
+    )
+    assert second_enroll.status_code == 200, second_enroll.text
+
+    first_path = photos_root / "2 ano" / "s" / "nome-repetido" / "front.jpg"
+    second_path = photos_root / "2 ano" / "s" / "nome-repetido-1" / "front.jpg"
+    assert first_path.exists()
+    assert second_path.exists()
+
+    assert first_enroll.json()["student"]["photo_url"] == "/media/2%20ano/s/nome-repetido/front.jpg"
+    assert second_enroll.json()["student"]["photo_url"] == "/media/2%20ano/s/nome-repetido-1/front.jpg"
 
 
 def test_identification_uses_score_gap_to_avoid_ambiguous_success(client: TestClient) -> None:
@@ -658,11 +1369,11 @@ def test_meal_entries_and_stats(client: TestClient) -> None:
     assert attendance_payload["attendance_days"] >= 1
     assert len(attendance_payload["recent_entries"]) == 2
 
-    coordinator_cannot_view_attendance = client.get(
+    coordinator_can_view_attendance = client.get(
         f"/students/{student_id}/attendance-summary",
         headers=auth_headers(coordinator_token),
     )
-    assert coordinator_cannot_view_attendance.status_code == 403
+    assert coordinator_can_view_attendance.status_code == 200
 
     charts = client.get("/stats/charts", headers=auth_headers(token))
     assert charts.status_code == 200
@@ -722,9 +1433,9 @@ def test_delete_student_removes_all_saved_face_images(client: TestClient, photos
         )
         assert enroll.status_code == 200, enroll.text
 
-    front_path = photos_root / "1 ano" / "l" / f"{student_id}.jpg"
-    right_path = photos_root / "1 ano" / "l" / f"{student_id}-right.jpg"
-    left_path = photos_root / "1 ano" / "l" / f"{student_id}-left.jpg"
+    front_path = photos_root / "1 ano" / "l" / "aluno-excluir-fotos" / "front.jpg"
+    right_path = photos_root / "1 ano" / "l" / "aluno-excluir-fotos" / "right.jpg"
+    left_path = photos_root / "1 ano" / "l" / "aluno-excluir-fotos" / "left.jpg"
     assert front_path.exists()
     assert right_path.exists()
     assert left_path.exists()
@@ -769,18 +1480,51 @@ def test_sem_rodizio_duplicate_is_idempotent(client: TestClient) -> None:
     assert len(entries.json()) == 1
 
 
-def test_json_store_migration_v4_adds_cpf_field(tmp_path: Path) -> None:
-    store_path = tmp_path / "legacy_store.json"
+def test_sqlite_store_migrates_legacy_json_and_generates_missing_cpf(tmp_path: Path) -> None:
+    database_path = tmp_path / "cantina.db"
+    legacy_path = tmp_path / "legacy_store.json"
+    original_cpf = build_valid_cpf(777)
     legacy_payload = {
-        "version": 4,
-        "users": [],
+        "version": 5,
+        "users": [
+            {
+                "id": "user-legacy",
+                "username": "diretor",
+                "full_name": "Diretor Legado",
+                "role": "diretor",
+                "password_hash": hash_password("123456"),
+                "is_active": True,
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-01T00:00:00+00:00",
+            }
+        ],
         "roles": ["diretor", "coordenadora", "funcionario"],
-        "classes": [],
+        "classes": [
+            {
+                "id": "class-1",
+                "name": "A",
+                "school_year": "1 ano",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-01T00:00:00+00:00",
+            }
+        ],
         "students": [
             {
                 "id": "student-1",
                 "full_name": "ALUNO LEGADO",
                 "class_id": "class-1",
+                "cpf": original_cpf,
+                "photo_path": None,
+                "photo_right_path": None,
+                "photo_left_path": None,
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-01T00:00:00+00:00",
+            },
+            {
+                "id": "student-2",
+                "full_name": "ALUNO SEM CPF",
+                "class_id": "class-1",
+                "cpf": None,
                 "photo_path": None,
                 "photo_right_path": None,
                 "photo_left_path": None,
@@ -792,12 +1536,437 @@ def test_json_store_migration_v4_adds_cpf_field(tmp_path: Path) -> None:
         "meal_entries": [],
         "recognition_attempts": [],
     }
-    store_path.write_text(json.dumps(legacy_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    legacy_path.write_text(json.dumps(legacy_payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    store = JsonStore(store_path)
-    migrated = store.read()
-    assert migrated["version"] == 5
-    assert migrated["students"][0]["cpf"] is None
+    store = SqliteStore(database_path)
+    did_migrate = store.migrate_legacy_json_if_needed(legacy_path)
+
+    assert did_migrate is True
+    assert not legacy_path.exists()
+
+    with sqlite3.connect(database_path) as connection:
+        rows = connection.execute("SELECT cpf FROM students ORDER BY id ASC").fetchall()
+    assert len(rows) == 2
+    cpfs = [row[0] for row in rows]
+    assert cpfs[0] == original_cpf
+    assert cpfs[1] is not None and len(cpfs[1]) == 11 and cpfs[1] != original_cpf
+
+
+def test_sqlite_store_migration_rolls_back_on_invalid_payload(tmp_path: Path) -> None:
+    database_path = tmp_path / "cantina.db"
+    legacy_path = tmp_path / "legacy_store.json"
+    legacy_payload = {
+        "version": 5,
+        "users": [
+            {
+                "id": "user-1",
+                "username": "diretor",
+                "full_name": "Diretor",
+                "role": "diretor",
+                "password_hash": hash_password("123456"),
+                "is_active": True,
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-01T00:00:00+00:00",
+            },
+            {
+                "id": "user-2",
+                "username": "diretor",
+                "full_name": "Diretor Duplicado",
+                "role": "diretor",
+                "password_hash": hash_password("123456"),
+                "is_active": True,
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-01T00:00:00+00:00",
+            },
+        ],
+        "roles": ["diretor", "coordenadora", "funcionario"],
+        "classes": [],
+        "students": [],
+        "face_embeddings": [],
+        "meal_entries": [],
+        "recognition_attempts": [],
+    }
+    legacy_path.write_text(json.dumps(legacy_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    store = SqliteStore(database_path)
+    with pytest.raises(sqlite3.IntegrityError):
+        store.migrate_legacy_json_if_needed(legacy_path)
+
+    assert legacy_path.exists()
+    assert store.is_empty() is True
+
+
+def test_sqlite_store_migrates_legacy_event_collections_to_json(tmp_path: Path) -> None:
+    database_path = tmp_path / "cantina.db"
+    legacy_path = tmp_path / "legacy_store.json"
+    meal_entries_path = tmp_path / "meal_entries.json"
+    recognition_attempts_path = tmp_path / "recognition_attempts.json"
+    legacy_payload = {
+        "version": 5,
+        "users": [
+            {
+                "id": "user-legacy",
+                "username": "diretor",
+                "full_name": "Diretor Legado",
+                "role": "diretor",
+                "password_hash": hash_password("123456"),
+                "is_active": True,
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-01T00:00:00+00:00",
+            }
+        ],
+        "roles": ["diretor", "coordenadora", "funcionario"],
+        "classes": [
+            {
+                "id": "class-legacy",
+                "name": "A",
+                "school_year": "1 ano",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-01T00:00:00+00:00",
+            }
+        ],
+        "students": [
+            {
+                "id": "student-legacy",
+                "full_name": "ALUNO LEGADO",
+                "class_id": "class-legacy",
+                "cpf": build_valid_cpf(888),
+                "photo_path": None,
+                "photo_right_path": None,
+                "photo_left_path": None,
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-01T00:00:00+00:00",
+            }
+        ],
+        "face_embeddings": [],
+        "meal_entries": [
+            {
+                "id": "meal-legacy",
+                "student_id": "student-legacy",
+                "student_name": "ALUNO LEGADO",
+                "class_id": "class-legacy",
+                "class_name": "A",
+                "class_display_name": "1 ano - A",
+                "school_year": "1 ano",
+                "meal_type": "almoco",
+                "recorded_at": "2026-01-02T11:30:00+00:00",
+                "recorded_by_user_id": "user-legacy",
+                "recorded_by_name": "Diretor Legado",
+                "source": "manual",
+                "confidence": 0.98,
+            }
+        ],
+        "recognition_attempts": [
+            {
+                "id": "attempt-legacy",
+                "status": "success",
+                "confidence": 0.98,
+                "student_id": "student-legacy",
+                "class_id": "class-legacy",
+                "recorded_at": "2026-01-02T11:20:00+00:00",
+            }
+        ],
+    }
+    legacy_path.write_text(json.dumps(legacy_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    store = SqliteStore(database_path)
+    meal_store = JsonCollectionStore(meal_entries_path)
+    recognition_store = JsonCollectionStore(recognition_attempts_path)
+    did_migrate = store.migrate_legacy_json_if_needed(
+        legacy_path,
+        meal_entries_store=meal_store,
+        recognition_attempts_store=recognition_store,
+    )
+
+    assert did_migrate is True
+    assert not legacy_path.exists()
+
+    meal_entries = meal_store.read()
+    recognition_attempts = recognition_store.read()
+    assert len(meal_entries) == 1
+    assert len(recognition_attempts) == 1
+    assert meal_entries[0]["id"] == "1"
+    assert meal_entries[0]["student_id"] == "1"
+    assert meal_entries[0]["recorded_by_user_id"] == "1"
+    assert recognition_attempts[0]["id"] == "1"
+    assert recognition_attempts[0]["student_id"] == "1"
+    assert recognition_attempts[0]["class_id"] == "1"
+
+
+def test_sqlite_store_migrates_event_tables_to_json_and_drops_tables(tmp_path: Path) -> None:
+    database_path = tmp_path / "cantina.db"
+    meal_entries_path = tmp_path / "meal_entries.json"
+    recognition_attempts_path = tmp_path / "recognition_attempts.json"
+    store = SqliteStore(database_path)
+
+    with store.connect() as connection:
+        connection.executescript(
+            """
+            CREATE TABLE meal_entries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                student_id INTEGER NOT NULL,
+                student_name TEXT NOT NULL,
+                class_id INTEGER NOT NULL,
+                class_name TEXT NOT NULL,
+                class_display_name TEXT NOT NULL,
+                school_year TEXT NOT NULL,
+                meal_type TEXT NOT NULL,
+                recorded_at TEXT NOT NULL,
+                recorded_by_user_id INTEGER NOT NULL,
+                recorded_by_name TEXT NOT NULL,
+                source TEXT NOT NULL,
+                confidence REAL
+            );
+
+            CREATE TABLE recognition_attempts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                status TEXT NOT NULL,
+                confidence REAL,
+                student_id INTEGER,
+                class_id INTEGER,
+                recorded_at TEXT NOT NULL
+            );
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO meal_entries (
+                student_id,
+                student_name,
+                class_id,
+                class_name,
+                class_display_name,
+                school_year,
+                meal_type,
+                recorded_at,
+                recorded_by_user_id,
+                recorded_by_name,
+                source,
+                confidence
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                10,
+                "ALUNO TESTE",
+                20,
+                "A",
+                "1 ano - A",
+                "1 ano",
+                "almoco",
+                "2026-01-03T11:30:00+00:00",
+                30,
+                "Diretor",
+                "manual",
+                0.99,
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO recognition_attempts (status, confidence, student_id, class_id, recorded_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            ("success", 0.99, 10, 20, "2026-01-03T11:20:00+00:00"),
+        )
+        connection.commit()
+
+    meal_store = JsonCollectionStore(meal_entries_path)
+    recognition_store = JsonCollectionStore(recognition_attempts_path)
+    did_migrate = store.migrate_event_tables_to_json_if_needed(
+        meal_entries_store=meal_store,
+        recognition_attempts_store=recognition_store,
+    )
+
+    assert did_migrate is True
+    assert meal_store.read() == [
+        {
+            "id": "1",
+            "student_id": "10",
+            "student_name": "ALUNO TESTE",
+            "class_id": "20",
+            "class_name": "A",
+            "class_display_name": "1 ano - A",
+            "school_year": "1 ano",
+            "meal_type": "almoco",
+            "recorded_at": "2026-01-03T11:30:00+00:00",
+            "recorded_by_user_id": "30",
+            "recorded_by_name": "Diretor",
+            "source": "manual",
+            "confidence": 0.99,
+        }
+    ]
+    assert recognition_store.read() == [
+        {
+            "id": "1",
+            "status": "success",
+            "confidence": 0.99,
+            "student_id": "10",
+            "class_id": "20",
+            "recorded_at": "2026-01-03T11:20:00+00:00",
+        }
+    ]
+
+    with sqlite3.connect(database_path) as connection:
+        meal_table = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'meal_entries'"
+        ).fetchone()
+        recognition_table = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'recognition_attempts'"
+        ).fetchone()
+
+    assert meal_table is None
+    assert recognition_table is None
+
+
+def test_sqlite_store_event_table_migration_rolls_back_drop_on_json_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database_path = tmp_path / "cantina.db"
+    meal_entries_path = tmp_path / "meal_entries.json"
+    recognition_attempts_path = tmp_path / "recognition_attempts.json"
+    store = SqliteStore(database_path)
+
+    with store.connect() as connection:
+        connection.executescript(
+            """
+            CREATE TABLE meal_entries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                student_id INTEGER NOT NULL,
+                student_name TEXT NOT NULL,
+                class_id INTEGER NOT NULL,
+                class_name TEXT NOT NULL,
+                class_display_name TEXT NOT NULL,
+                school_year TEXT NOT NULL,
+                meal_type TEXT NOT NULL,
+                recorded_at TEXT NOT NULL,
+                recorded_by_user_id INTEGER NOT NULL,
+                recorded_by_name TEXT NOT NULL,
+                source TEXT NOT NULL,
+                confidence REAL
+            );
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO meal_entries (
+                student_id,
+                student_name,
+                class_id,
+                class_name,
+                class_display_name,
+                school_year,
+                meal_type,
+                recorded_at,
+                recorded_by_user_id,
+                recorded_by_name,
+                source,
+                confidence
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                10,
+                "ALUNO TESTE",
+                20,
+                "A",
+                "1 ano - A",
+                "1 ano",
+                "almoco",
+                "2026-01-03T11:30:00+00:00",
+                30,
+                "Diretor",
+                "manual",
+                0.99,
+            ),
+        )
+        connection.commit()
+
+    meal_store = JsonCollectionStore(meal_entries_path)
+    recognition_store = JsonCollectionStore(recognition_attempts_path)
+
+    def fail_write(_: list[dict]) -> None:
+        raise OSError("write failed")
+
+    monkeypatch.setattr(meal_store, "write", fail_write)
+
+    with pytest.raises(OSError):
+        store.migrate_event_tables_to_json_if_needed(
+            meal_entries_store=meal_store,
+            recognition_attempts_store=recognition_store,
+        )
+
+    with sqlite3.connect(database_path) as connection:
+        meal_table = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'meal_entries'"
+        ).fetchone()
+        meal_count = connection.execute("SELECT COUNT(1) FROM meal_entries").fetchone()
+
+    assert meal_table is not None
+    assert meal_count is not None and int(meal_count[0]) == 1
+
+
+def test_sqlite_store_event_table_migration_blocks_drop_when_json_diverges(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "cantina.db"
+    meal_entries_path = tmp_path / "meal_entries.json"
+    recognition_attempts_path = tmp_path / "recognition_attempts.json"
+    store = SqliteStore(database_path)
+
+    with store.connect() as connection:
+        connection.executescript(
+            """
+            CREATE TABLE meal_entries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                student_id INTEGER NOT NULL,
+                student_name TEXT NOT NULL,
+                class_id INTEGER NOT NULL,
+                class_name TEXT NOT NULL,
+                class_display_name TEXT NOT NULL,
+                school_year TEXT NOT NULL,
+                meal_type TEXT NOT NULL,
+                recorded_at TEXT NOT NULL,
+                recorded_by_user_id INTEGER NOT NULL,
+                recorded_by_name TEXT NOT NULL,
+                source TEXT NOT NULL,
+                confidence REAL
+            );
+            """
+        )
+        connection.commit()
+
+    meal_store = JsonCollectionStore(meal_entries_path)
+    recognition_store = JsonCollectionStore(recognition_attempts_path)
+    meal_store.write(
+        [
+            {
+                "id": "1",
+                "student_id": "999",
+                "student_name": "DADO ANTIGO",
+                "class_id": "999",
+                "class_name": "X",
+                "class_display_name": "1 ano - X",
+                "school_year": "1 ano",
+                "meal_type": "almoco",
+                "recorded_at": "2026-01-01T00:00:00+00:00",
+                "recorded_by_user_id": "1",
+                "recorded_by_name": "Diretor",
+                "source": "manual",
+                "confidence": 0.1,
+            }
+        ]
+    )
+
+    with pytest.raises(ValueError):
+        store.migrate_event_tables_to_json_if_needed(
+            meal_entries_store=meal_store,
+            recognition_attempts_store=recognition_store,
+        )
+
+    with sqlite3.connect(database_path) as connection:
+        meal_table = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'meal_entries'"
+        ).fetchone()
+
+    assert meal_table is not None
 
 
 def test_settings_rejects_unsafe_defaults_in_production(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -810,8 +1979,8 @@ def test_settings_rejects_unsafe_defaults_in_production(monkeypatch: pytest.Monk
 
 
 def test_bootstrap_director_recovers_existing_inactive_non_director(tmp_path: Path) -> None:
-    store = JsonStore(tmp_path / "store.json")
-    user_repository = JsonUserRepository(store)
+    store = SqliteStore(tmp_path / "store.db")
+    user_repository = SqliteUserRepository(store)
     role_repository = StaticRoleRepository()
     service = UserService(user_repository, role_repository)
 

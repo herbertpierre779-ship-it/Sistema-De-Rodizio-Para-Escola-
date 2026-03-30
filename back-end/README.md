@@ -1,33 +1,32 @@
-# Cantina Backend
+# 🍽️ Back-end — Sistema de Rodízio de Almoço
 
-API FastAPI criada em `back-end/` para atender o frontend React/Vite sem assumir a implementacao final do MySQL. O projeto trabalha com contratos de persistencia em `app/repositories/contracts.py` e, por enquanto, usa um adaptador JSON local para desenvolvimento e testes.
+## 📖 Sobre
 
-## Stack
+Este é o **back-end da API** do sistema da cantina escolar.  
+Ele centraliza:
 
-- Python 3.10 ou 3.11
-- FastAPI + Pydantic
-- JWT Bearer
-- CORS liberado para localhost e IPs privados da rede local
-- Adaptador provisorio em JSON
-- Reconhecimento facial com prioridade para `face_recognition` e fallback para OpenCV
+- autenticação de usuários
+- cadastro de alunos e turmas
+- matrícula facial (3 fotos ou 100 fotos)
+- reconhecimento facial e validação por CPF
+- registro de refeições e bloqueio de duplicidade
+- estatísticas e configurações do sistema
 
-## Fluxo atual
+---
 
-- Fotos dos alunos ficam em `fotos/<ano>/<turma_slug>/<student_id>.<ext>`
-- Os anos disponiveis sao fixos: `1 ano`, `2 ano`, `3 ano`
-- O frontend consome as fotos por `/media/...`
-- O tipo de refeicao operacional agora e `almoco`, `merenda` ou `sem_rodizio`
-- As estatisticas usam a data local da escola com janela movel dos ultimos 7 dias
+## 🛠️ Tecnologias Utilizadas
 
-## Estrutura
+- 🐍 **Python 3.11+**
+- ⚡ **FastAPI**
+- 🧩 **Pydantic**
+- 🔐 **JWT (Bearer Token)**
+- 🗄️ **SQLite** (dados principais)
+- 🧾 **JSON** (`meal_entries` e `recognition_attempts`)
+- ✅ **Pytest** (testes)
 
-- `app/api/routes`: rotas HTTP
-- `app/schemas`: contratos tipados de request/response
-- `app/services`: regras de negocio
-- `app/repositories`: contratos de persistencia para handoff ao colega do banco
-- `app/adapters`: implementacoes provisorias de infraestrutura
+---
 
-## Executar
+## 🚀 Como executar
 
 ```bash
 cd back-end
@@ -38,20 +37,83 @@ pip install -r requirements-face.txt
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-Se `face_recognition` nao estiver instalado, a API continua funcionando com fallback. Para testes automatizados, existe tambem o modo `mock` com `CANTINA_FACE_ENGINE=mock`.
+Quando estiver rodando localmente, a API fica disponível em:
 
-## Variaveis principais
+- `http://localhost:8000`
 
-- `CANTINA_PHOTOS_ROOT`: pasta raiz das fotos, por exemplo `C:\Users\fa285\Downloads\cantina\fotos`
-- `CANTINA_FRONTEND_ORIGINS_RAW`: origens permitidas do frontend
+Documentação automática local:
+
+- `http://localhost:8000/docs`
+
+---
+
+## 🗂️ Estrutura (resumo)
+
+- `app/api/routes` → rotas HTTP
+- `app/schemas` → contratos de request/response
+- `app/services` → regras de negócio
+- `app/repositories` → contratos de persistência
+- `app/adapters/persistence` → SQLite + JSON stores/repositories
+- `app/core` → config, container, segurança e utilitários
+- `tests` → testes automatizados da API
+
+---
+
+## 🧠 Persistência atual
+
+- **SQLite (`cantina.db`)**:
+  - usuários
+  - turmas
+  - alunos
+  - embeddings faciais
+  - configurações (`app_settings`)
+
+- **JSON dedicado**:
+  - `back-end/data/meal_entries.json` (entradas/atendimentos)
+  - `back-end/data/recognition_attempts.json` (tentativas de reconhecimento)
+
+---
+
+## ⚙️ Variáveis principais
+
+Use o `.env.example` como base.  
+As mais usadas:
+
+- `CANTINA_DATABASE_FILE`
+- `CANTINA_MEAL_ENTRIES_FILE`
+- `CANTINA_RECOGNITION_ATTEMPTS_FILE`
+- `CANTINA_PHOTOS_ROOT`
 - `CANTINA_BOOTSTRAP_DIRECTOR_USERNAME`
 - `CANTINA_BOOTSTRAP_DIRECTOR_PASSWORD`
 - `CANTINA_BOOTSTRAP_DIRECTOR_FULL_NAME`
 - `CANTINA_SCHOOL_TIMEZONE`
 
-## Testes
+---
+
+## 🧪 Testes
 
 ```bash
 cd back-end
-pytest
+python -m pytest
 ```
+
+Checagem de sintaxe:
+
+```bash
+cd back-end
+python -m compileall app
+```
+
+---
+
+## 📌 Observações
+
+- O reconhecimento continua funcional em modo fallback quando o engine principal não está disponível.
+- O diretório de fotos é organizado por `ano/turma/nome-do-aluno`.
+- Endpoints e contratos públicos foram mantidos compatíveis durante as mudanças recentes.
+
+---
+
+## 🚧 Status do Back-end
+
+🚧 Em desenvolvimento

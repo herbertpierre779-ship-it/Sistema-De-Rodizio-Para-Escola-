@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import math
-from uuid import uuid4
 
 from app.adapters.face.engine import BaseFaceEngine
 from app.core.clock import utc_now
@@ -16,6 +15,7 @@ from app.models.entities import (
     RecognitionStatus,
     SchoolYear,
     StudentRecord,
+    UserRecord,
 )
 from app.repositories.contracts import (
     ClassRepository,
@@ -24,6 +24,7 @@ from app.repositories.contracts import (
     StudentRepository,
 )
 from app.schemas.recognition import RecognitionIdentifyResponse, RecognitionStudentResponse
+from app.services.app_settings_service import AppSettingsService
 from app.services.meal_entry_service import MealEntryService
 
 
@@ -36,6 +37,7 @@ class RecognitionService:
         face_embedding_repository: FaceEmbeddingRepository,
         recognition_attempt_repository: RecognitionAttemptRepository,
         face_engine: BaseFaceEngine,
+        app_settings_service: AppSettingsService,
         meal_entry_service: MealEntryService,
     ) -> None:
         self.settings = settings
@@ -44,9 +46,18 @@ class RecognitionService:
         self.face_embedding_repository = face_embedding_repository
         self.recognition_attempt_repository = recognition_attempt_repository
         self.face_engine = face_engine
+        self.app_settings_service = app_settings_service
         self.meal_entry_service = meal_entry_service
 
-    def identify(self, image_bytes: bytes, *, meal_type: MealType | None = None) -> RecognitionIdentifyResponse:
+    def identify(
+        self,
+        image_bytes: bytes,
+        *,
+        meal_type: MealType | None = None,
+        current_user: UserRecord,
+    ) -> RecognitionIdentifyResponse:
+        if meal_type and not self.app_settings_service.is_meal_available_for_role(meal_type, current_user.role):
+            raise AppError(403, self.app_settings_service.unavailable_meal_message(meal_type))
         extraction = self.face_engine.extract_embedding(image_bytes)
         if extraction.status in {
             RecognitionStatus.no_face_detected,
@@ -171,7 +182,15 @@ class RecognitionService:
             student=None,
         )
 
-    def identify_by_cpf(self, cpf: str, *, meal_type: MealType) -> RecognitionIdentifyResponse:
+    def identify_by_cpf(
+        self,
+        cpf: str,
+        *,
+        meal_type: MealType,
+        current_user: UserRecord,
+    ) -> RecognitionIdentifyResponse:
+        if not self.app_settings_service.is_meal_available_for_role(meal_type, current_user.role):
+            raise AppError(403, self.app_settings_service.unavailable_meal_message(meal_type))
         normalized_cpf = normalize_cpf(cpf)
         if not is_valid_cpf(normalized_cpf):
             raise AppError(400, "CPF inválido. Informe um CPF válido com 11 dígitos.")
@@ -235,7 +254,6 @@ class RecognitionService:
     ) -> None:
         self.recognition_attempt_repository.create(
             RecognitionAttemptRecord(
-                id=uuid4().hex,
                 status=status,
                 confidence=round(confidence, 4) if confidence is not None else None,
                 student_id=student.id if student else None,

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import date
-from uuid import uuid4
 
 from app.core.clock import school_today, to_school_datetime, utc_now
 from app.core.config import Settings
@@ -9,22 +8,27 @@ from app.core.exceptions import AppError
 from app.models.entities import MealEntryRecord, MealType, UserRecord
 from app.repositories.contracts import ClassRepository, MealEntryFilters, MealEntryRepository, StudentRepository
 from app.schemas.meal_entries import MealEntryCreateRequest, MealEntryResponse
+from app.services.app_settings_service import AppSettingsService
 
 
 class MealEntryService:
     def __init__(
         self,
         settings: Settings,
+        app_settings_service: AppSettingsService,
         meal_entry_repository: MealEntryRepository,
         student_repository: StudentRepository,
         class_repository: ClassRepository,
     ) -> None:
         self.settings = settings
+        self.app_settings_service = app_settings_service
         self.meal_entry_repository = meal_entry_repository
         self.student_repository = student_repository
         self.class_repository = class_repository
 
     def create_entry(self, payload: MealEntryCreateRequest, *, current_user: UserRecord) -> MealEntryResponse:
+        if not self.app_settings_service.is_meal_available_for_role(payload.meal_type, current_user.role):
+            raise AppError(403, self.app_settings_service.unavailable_meal_message(payload.meal_type))
         student = self.student_repository.get_by_id(payload.student_id)
         if not student:
             raise AppError(404, "Aluno não encontrado.")
@@ -40,7 +44,6 @@ class MealEntryService:
             raise AppError(409, self.duplicate_message(payload.meal_type))
 
         record = MealEntryRecord(
-            id=uuid4().hex,
             student_id=student.id,
             student_name=student.full_name,
             class_id=class_record.id,

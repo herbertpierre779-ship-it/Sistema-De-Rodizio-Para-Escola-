@@ -26,7 +26,11 @@ class Settings(BaseSettings):
         r"172\.(?:1[6-9]|2\d|3[0-1])(?:\.\d{1,3}){2}"
         r")(?::\d+)?$"
     )
-    data_file: str = "back-end/data/dev_store.json"
+    database_file: str = "back-end/data/cantina.db"
+    legacy_data_file: str = "back-end/data/dev_store.json"
+    meal_entries_file: str = "back-end/data/meal_entries.json"
+    recognition_attempts_file: str = "back-end/data/recognition_attempts.json"
+    keep_legacy_backup: bool = False
     photos_root: str = "fotos"
     bootstrap_director_username: str = "diretor"
     bootstrap_director_password: str = "123456"
@@ -49,8 +53,23 @@ class Settings(BaseSettings):
         return Path(__file__).resolve().parents[2]
 
     @property
-    def data_file_path(self) -> Path:
-        configured = Path(self.data_file)
+    def database_file_path(self) -> Path:
+        configured = Path(self.database_file)
+        return configured if configured.is_absolute() else self.backend_root.parent / configured
+
+    @property
+    def legacy_data_file_path(self) -> Path:
+        configured = Path(self.legacy_data_file)
+        return configured if configured.is_absolute() else self.backend_root.parent / configured
+
+    @property
+    def meal_entries_file_path(self) -> Path:
+        configured = Path(self.meal_entries_file)
+        return configured if configured.is_absolute() else self.backend_root.parent / configured
+
+    @property
+    def recognition_attempts_file_path(self) -> Path:
+        configured = Path(self.recognition_attempts_file)
         return configured if configured.is_absolute() else self.backend_root.parent / configured
 
     @property

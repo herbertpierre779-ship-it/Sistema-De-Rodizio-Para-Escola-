@@ -14,8 +14,38 @@ def photos_root(tmp_path: Path) -> Path:
 
 
 @pytest.fixture()
-def client(tmp_path: Path, photos_root: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
-    monkeypatch.setenv("CANTINA_DATA_FILE", str(tmp_path / "dev_store.json"))
+def database_file(tmp_path: Path) -> Path:
+    return tmp_path / "cantina.db"
+
+
+@pytest.fixture()
+def legacy_data_file(tmp_path: Path) -> Path:
+    return tmp_path / "dev_store.json"
+
+
+@pytest.fixture()
+def meal_entries_file(tmp_path: Path) -> Path:
+    return tmp_path / "meal_entries.json"
+
+
+@pytest.fixture()
+def recognition_attempts_file(tmp_path: Path) -> Path:
+    return tmp_path / "recognition_attempts.json"
+
+
+@pytest.fixture()
+def client(
+    photos_root: Path,
+    database_file: Path,
+    legacy_data_file: Path,
+    meal_entries_file: Path,
+    recognition_attempts_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[TestClient]:
+    monkeypatch.setenv("CANTINA_DATABASE_FILE", str(database_file))
+    monkeypatch.setenv("CANTINA_LEGACY_DATA_FILE", str(legacy_data_file))
+    monkeypatch.setenv("CANTINA_MEAL_ENTRIES_FILE", str(meal_entries_file))
+    monkeypatch.setenv("CANTINA_RECOGNITION_ATTEMPTS_FILE", str(recognition_attempts_file))
     monkeypatch.setenv("CANTINA_PHOTOS_ROOT", str(photos_root))
     monkeypatch.setenv("CANTINA_FACE_ENGINE", "mock")
     monkeypatch.setenv("CANTINA_SECRET_KEY", "test-secret-key-with-32-characters")

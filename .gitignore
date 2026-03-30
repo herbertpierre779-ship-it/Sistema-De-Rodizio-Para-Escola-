@@ -1,12 +1,53 @@
-git hub
-node_modules
-dist
-.vite
-ligar-servidores.bat
-5173
-8000
-ligar-celular-adb-reverse.bat
-sons
-lixinhos do pierre
+# arquivos pessoais
+/git hub
+/5173
+/8000
+/ligar-servidores.bat
+/ligar-celular-adb-reverse.bat
+/sons/
+/lixinhos do pierre/
+
+# frontend
+node_modules/
+dist/
+.vite/
+Front-end/node_modules/
+Front-end/dist/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+#  backend /cache
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local envs
+.env
+.env.*
+!.env.example
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Runtime data/ local backups
+back-end/data/*.db
+back-end/data/*.db-*
+back-end/data/meal_entries.json
+back-end/data/recognition_attempts.json
+back-end/data/dev_store.json
+back-end/data/id_reset_backup_*/
+
+# fotinhas 
 /fotos/
 

@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, File, Query, Response, UploadFile, status
 
-from app.api.dependencies import get_container, get_current_user, require_roles
+from app.api.dependencies import get_container, get_current_user, require_module_permission
 from app.core.container import AppContainer
-from app.models.entities import UserRecord, UserRole
+from app.models.entities import UserRecord
 from app.schemas.students import (
     FaceEnrollResponse,
     StudentAttendanceSummaryResponse,
@@ -28,7 +28,7 @@ def list_students(
 @router.post("", response_model=StudentResponse, status_code=status.HTTP_201_CREATED)
 def create_student(
     payload: StudentCreateRequest,
-    _: UserRecord = Depends(get_current_user),
+    _: UserRecord = Depends(require_module_permission("cadastro_aluno")),
     container: AppContainer = Depends(get_container),
 ) -> StudentResponse:
     return container.student_service.create_student(payload)
@@ -47,7 +47,7 @@ def get_student(
 def get_student_attendance_summary(
     student_id: str,
     month: str | None = Query(default=None),
-    _: UserRecord = Depends(require_roles(UserRole.diretor)),
+    _: UserRecord = Depends(require_module_permission("estatisticas")),
     container: AppContainer = Depends(get_container),
 ) -> StudentAttendanceSummaryResponse:
     return container.student_service.get_attendance_summary(student_id, month_value=month)
@@ -57,7 +57,7 @@ def get_student_attendance_summary(
 def update_student(
     student_id: str,
     payload: StudentUpdateRequest,
-    _: UserRecord = Depends(get_current_user),
+    _: UserRecord = Depends(require_module_permission("cadastro_aluno")),
     container: AppContainer = Depends(get_container),
 ) -> StudentResponse:
     return container.student_service.update_student(student_id, payload)
@@ -66,7 +66,7 @@ def update_student(
 @router.delete("/{student_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_student(
     student_id: str,
-    _: UserRecord = Depends(get_current_user),
+    _: UserRecord = Depends(require_module_permission("cadastro_aluno")),
     container: AppContainer = Depends(get_container),
 ) -> Response:
     container.student_service.delete_student(student_id)
@@ -77,7 +77,7 @@ def delete_student(
 async def enroll_face(
     student_id: str,
     file: UploadFile = File(...),
-    _: UserRecord = Depends(get_current_user),
+    _: UserRecord = Depends(require_module_permission("cadastro_aluno")),
     container: AppContainer = Depends(get_container),
 ) -> FaceEnrollResponse:
     return container.student_service.enroll_face(

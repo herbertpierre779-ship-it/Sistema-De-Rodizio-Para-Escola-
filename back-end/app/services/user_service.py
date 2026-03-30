@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from uuid import uuid4
 
 from app.core.exceptions import AppError
 from app.core.security import hash_password
@@ -37,7 +36,6 @@ class UserService:
 
         now = datetime.now(UTC)
         user = UserRecord(
-            id=uuid4().hex,
             username=payload.username,
             full_name=payload.full_name,
             role=payload.role,

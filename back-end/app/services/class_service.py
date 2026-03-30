@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from uuid import uuid4
 
 from app.core.exceptions import AppError
 from app.models.entities import ClassRecord, SchoolYear
@@ -41,7 +40,6 @@ class ClassService:
             raise AppError(409, "Já existe uma turma com esse nome.")
         now = datetime.now(UTC)
         class_record = ClassRecord(
-            id=uuid4().hex,
             name=normalized_name,
             school_year=payload.school_year,
             created_at=now,

@@ -63,15 +63,15 @@ A aplicação permite gerenciar a ordem das turmas diariamente, garantindo que c
 
 ## 🛠️ Tecnologias Utilizadas
 
-- 🌐 **Front-end:** HTML + CSS  
-- ⚙️ **Back-end:** Python  
-- 🗄️ **Banco de Dados:** SQLite  
+- 🌐 **Front-end:** React + TypeScript + Vite + Tailwind CSS  
+- ⚙️ **Back-end:** Python + FastAPI + Pydantic  
+- 🗄️ **Persistência de Dados:** SQLite + JSON 
 
 ---
 
 ## 🚀 Status do Projeto
 
-🚧 Em desenvolvimento  
+🚧 Em desenvolvimento 
 
 ---
 

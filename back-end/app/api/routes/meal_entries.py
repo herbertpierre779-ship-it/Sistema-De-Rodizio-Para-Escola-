@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Query, status
 
-from app.api.dependencies import get_container, get_current_user
+from app.api.dependencies import get_container, get_current_user, require_module_permission
 from app.core.container import AppContainer
 from app.models.entities import MealType, UserRecord
 from app.schemas.meal_entries import MealEntryCreateRequest, MealEntryResponse
@@ -14,7 +14,7 @@ router = APIRouter(prefix="/meal-entries", tags=["meal-entries"])
 @router.post("", response_model=MealEntryResponse, status_code=status.HTTP_201_CREATED)
 def create_meal_entry(
     payload: MealEntryCreateRequest,
-    current_user: UserRecord = Depends(get_current_user),
+    current_user: UserRecord = Depends(require_module_permission("operacao")),
     container: AppContainer = Depends(get_container),
 ) -> MealEntryResponse:
     return container.meal_entry_service.create_entry(payload, current_user=current_user)

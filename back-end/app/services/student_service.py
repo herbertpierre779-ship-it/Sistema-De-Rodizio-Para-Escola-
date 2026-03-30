@@ -1,19 +1,21 @@
 from __future__ import annotations
 
+import shutil
+import time
 from collections import defaultdict
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
-from uuid import uuid4
 
 from app.adapters.face.engine import BaseFaceEngine
 from app.core.clock import school_today, to_school_datetime
 from app.core.config import Settings
 from app.core.cpf import is_valid_cpf, normalize_cpf
 from app.core.exceptions import AppError
-from app.core.media import PhotoPose, build_media_url, build_photo_relative_path
+from app.core.media import build_media_url, build_photo_relative_path, build_student_media_directory, slugify_segment
 from app.models.entities import ClassRecord, FaceEmbeddingRecord, MealType, RecognitionStatus, StudentRecord
 from app.repositories.contracts import (
+    AppSettingsRepository,
     ClassRepository,
     FaceEmbeddingRepository,
     MealEntryFilters,
@@ -32,13 +34,15 @@ from app.schemas.students import (
 )
 from app.services.meal_entry_service import MealEntryService
 
-CapturePose = Literal["front", "right", "left", "unknown"]
+CaptureKind = Literal["front", "right", "left", "sample", "unknown"]
+LEGACY_MEDIA_MIGRATION_KEY = "legacy_media_migration_v1_done"
 
 
 class StudentService:
     def __init__(
         self,
         settings: Settings,
+        app_settings_repository: AppSettingsRepository,
         student_repository: StudentRepository,
         class_repository: ClassRepository,
         face_embedding_repository: FaceEmbeddingRepository,
@@ -47,12 +51,26 @@ class StudentService:
         face_engine: BaseFaceEngine,
     ) -> None:
         self.settings = settings
+        self.app_settings_repository = app_settings_repository
         self.student_repository = student_repository
         self.class_repository = class_repository
         self.face_embedding_repository = face_embedding_repository
         self.meal_entry_repository = meal_entry_repository
         self.recognition_attempt_repository = recognition_attempt_repository
         self.face_engine = face_engine
+
+    def migrate_legacy_media_if_needed(self) -> None:
+        if self.app_settings_repository.get_value(LEGACY_MEDIA_MIGRATION_KEY) == "done":
+            return
+
+        students = sorted(self.student_repository.list_students(), key=lambda item: int(item.id) if item.id.isdigit() else 0)
+        for student in students:
+            class_record = self.class_repository.get_by_id(student.class_id)
+            if not class_record:
+                continue
+            self._migrate_student_legacy_media(student, class_record)
+
+        self.app_settings_repository.set_value(LEGACY_MEDIA_MIGRATION_KEY, "done")
 
     def list_students(self) -> list[StudentResponse]:
         students = sorted(self.student_repository.list_students(), key=lambda item: item.full_name.casefold())
@@ -120,47 +138,71 @@ class StudentService:
         normalized_cpf = self._normalize_and_validate_cpf(payload.cpf)
         if self.student_repository.get_by_cpf(normalized_cpf):
             raise AppError(409, "Já existe um aluno cadastrado com esse CPF.")
+        full_name = normalize_uppercase_text(payload.full_name)
         now = datetime.now(UTC)
+        media_folder = self._build_unique_media_folder(payload.class_id, full_name, exclude_student_id=None)
         student = StudentRecord(
-            id=uuid4().hex,
-            full_name=normalize_uppercase_text(payload.full_name),
+            full_name=full_name,
             class_id=payload.class_id,
             cpf=normalized_cpf,
+            media_folder=media_folder,
             created_at=now,
             updated_at=now,
         )
         return self.to_response(self.student_repository.create(student))
 
     def update_student(self, student_id: str, payload: StudentUpdateRequest) -> StudentResponse:
-        student = self.get_student_record(student_id)
-        current_class = self._ensure_class_exists(student.class_id)
-        next_class_id = payload.class_id or student.class_id
-        next_class = self._ensure_class_exists(next_class_id)
-        next_cpf = student.cpf
+        previous_student = self.get_student_record(student_id)
+        next_class_id = payload.class_id or previous_student.class_id
+        self._ensure_class_exists(next_class_id)
+        next_full_name = (
+            normalize_uppercase_text(payload.full_name) if payload.full_name is not None else previous_student.full_name
+        )
+
+        next_cpf = previous_student.cpf
         if payload.cpf is not None:
             normalized_cpf = self._normalize_and_validate_cpf(payload.cpf)
             existing_with_cpf = self.student_repository.get_by_cpf(normalized_cpf)
-            if existing_with_cpf and existing_with_cpf.id != student.id:
+            if existing_with_cpf and existing_with_cpf.id != previous_student.id:
                 raise AppError(409, "Já existe um aluno cadastrado com esse CPF.")
             next_cpf = normalized_cpf
 
-        updated = student.model_copy(
+        media_folder_changed = (
+            payload.full_name is not None
+            or payload.class_id is not None
+            or not previous_student.media_folder
+        )
+        next_media_folder = previous_student.media_folder
+        if media_folder_changed:
+            next_media_folder = self._build_unique_media_folder(
+                next_class_id,
+                next_full_name,
+                exclude_student_id=previous_student.id,
+            )
+
+        updated_student = previous_student.model_copy(
             update={
-                "full_name": normalize_uppercase_text(payload.full_name) if payload.full_name else student.full_name,
+                "full_name": next_full_name,
                 "class_id": next_class_id,
                 "cpf": next_cpf,
+                "media_folder": next_media_folder,
                 "updated_at": datetime.now(UTC),
             }
         )
-        persisted = self.student_repository.update(updated)
-        if current_class.id != next_class.id:
-            persisted = self._move_student_media_if_needed(persisted, next_class)
+        persisted = self.student_repository.update(updated_student)
+        if (
+            previous_student.class_id != persisted.class_id
+            or previous_student.media_folder != persisted.media_folder
+            or payload.full_name is not None
+        ):
+            persisted = self._relocate_student_media(previous_student, persisted)
         return self.to_response(persisted)
 
     def delete_student(self, student_id: str) -> None:
         student = self.get_student_record(student_id)
         self.face_embedding_repository.delete_by_student_id(student_id)
         self.meal_entry_repository.delete_by_student_id(student_id)
+        self._delete_student_media_directory(student)
         self._delete_photo(student.photo_path)
         self._delete_photo(student.photo_right_path)
         self._delete_photo(student.photo_left_path)
@@ -177,36 +219,50 @@ class StudentService:
     ) -> FaceEnrollResponse:
         _ = content_type
         student = self.get_student_record(student_id)
+        class_record = self._ensure_class_exists(student.class_id)
+        student = self._ensure_student_media_folder(student, class_record)
+
         extraction = self.face_engine.extract_embedding(image_bytes)
         if extraction.status != RecognitionStatus.success or not extraction.vector:
             raise AppError(400, extraction.message)
 
         now = datetime.now(UTC)
         existing_embedding = self.face_embedding_repository.get_by_student_id(student_id)
-        capture_pose = self._resolve_capture_pose(filename)
+        capture_kind, sample_cycle, sample_index = self._resolve_capture_kind(filename)
         student_updates: dict[str, object] = {}
-        source_image_path = student.photo_path
 
-        if capture_pose == "front":
-            front_path = self._save_photo(student_id, image_bytes, pose="front")
+        source_image_path: str | None = student.photo_path
+
+        if capture_kind == "front":
+            front_path = self._save_named_photo(student, class_record, image_bytes, "front.jpg")
             student_updates["photo_path"] = front_path
             source_image_path = front_path
-        elif capture_pose == "right":
-            right_path = self._save_photo(student_id, image_bytes, pose="right")
+        elif capture_kind == "right":
+            right_path = self._save_named_photo(student, class_record, image_bytes, "right.jpg")
             student_updates["photo_right_path"] = right_path
             source_image_path = right_path
             if not student.photo_path:
-                student_updates["photo_path"] = self._save_photo(student_id, image_bytes, pose="front")
-        elif capture_pose == "left":
-            left_path = self._save_photo(student_id, image_bytes, pose="left")
+                student_updates["photo_path"] = right_path
+        elif capture_kind == "left":
+            left_path = self._save_named_photo(student, class_record, image_bytes, "left.jpg")
             student_updates["photo_left_path"] = left_path
             source_image_path = left_path
             if not student.photo_path:
-                student_updates["photo_path"] = self._save_photo(student_id, image_bytes, pose="front")
-        elif not student.photo_path:
-            fallback_front_path = self._save_photo(student_id, image_bytes, pose="front")
-            student_updates["photo_path"] = fallback_front_path
-            source_image_path = fallback_front_path
+                student_updates["photo_path"] = left_path
+        elif capture_kind == "sample" and sample_cycle is not None and sample_index is not None:
+            sample_filename = f"cycle-{sample_cycle:02d}-{sample_index:03d}.jpg"
+            sample_path = self._save_named_photo(student, class_record, image_bytes, sample_filename)
+            source_image_path = sample_path
+            if not student.photo_path:
+                student_updates["photo_path"] = sample_path
+        else:
+            if not student.photo_path:
+                fallback_path = self._save_named_photo(student, class_record, image_bytes, "front.jpg")
+                student_updates["photo_path"] = fallback_path
+                source_image_path = fallback_path
+            else:
+                timestamp_filename = f"sample-{int(time.time() * 1000)}.jpg"
+                source_image_path = self._save_named_photo(student, class_record, image_bytes, timestamp_filename)
 
         if student_updates:
             student_updates["updated_at"] = now
@@ -230,7 +286,7 @@ class StudentService:
             next_samples_count = max(existing_embedding.samples_count, 1) + 1
 
         embedding = FaceEmbeddingRecord(
-            id=existing_embedding.id if existing_embedding else uuid4().hex,
+            id=existing_embedding.id if existing_embedding else "",
             student_id=student_id,
             engine=extraction.engine,
             vector=averaged_vector,
@@ -260,7 +316,90 @@ class StudentService:
 
     def sync_student_media_location(self, student_id: str, class_record: ClassRecord) -> StudentRecord:
         student = self.get_student_record(student_id)
-        return self._move_student_media_if_needed(student, class_record)
+        student = self._ensure_student_media_folder(student, class_record)
+        return self._relocate_student_media(student, student, target_class=class_record)
+
+    def _migrate_student_legacy_media(self, student: StudentRecord, class_record: ClassRecord) -> None:
+        if not self._is_legacy_student_media(student):
+            return
+
+        now = datetime.now(UTC)
+        migrated_student = student
+        if not migrated_student.media_folder:
+            next_media_folder = self._build_unique_media_folder(
+                class_record.id,
+                migrated_student.full_name,
+                exclude_student_id=migrated_student.id,
+            )
+            migrated_student = self.student_repository.update(
+                migrated_student.model_copy(update={"media_folder": next_media_folder, "updated_at": now})
+            )
+
+        if not migrated_student.media_folder:
+            return
+
+        target_dir = build_student_media_directory(class_record, migrated_student.media_folder)
+        target_front = f"{target_dir}/front.jpg"
+        target_right = f"{target_dir}/right.jpg"
+        target_left = f"{target_dir}/left.jpg"
+
+        old_front = student.photo_path
+        old_right = student.photo_right_path
+        old_left = student.photo_left_path
+
+        path_remap: dict[str, str] = {}
+        front_exists = self._move_file_if_exists(old_front, target_front, move=True)
+        if old_front and front_exists:
+            path_remap[old_front] = target_front
+
+        right_exists = self._move_file_if_exists(old_right, target_right, move=True)
+        if old_right and right_exists:
+            path_remap[old_right] = target_right
+
+        left_exists = self._move_file_if_exists(old_left, target_left, move=True)
+        if old_left and left_exists:
+            path_remap[old_left] = target_left
+
+        if not front_exists:
+            if right_exists:
+                self._copy_file_if_exists(target_right, target_front)
+                front_exists = self._file_exists(target_front)
+            elif left_exists:
+                self._copy_file_if_exists(target_left, target_front)
+                front_exists = self._file_exists(target_front)
+
+        if front_exists and not right_exists:
+            self._copy_file_if_exists(target_front, target_right)
+            right_exists = self._file_exists(target_right)
+        if front_exists and not left_exists:
+            self._copy_file_if_exists(target_front, target_left)
+            left_exists = self._file_exists(target_left)
+
+        student_updates: dict[str, object] = {"updated_at": datetime.now(UTC)}
+        student_updates["photo_path"] = target_front if front_exists else None
+        student_updates["photo_right_path"] = target_right if right_exists else None
+        student_updates["photo_left_path"] = target_left if left_exists else None
+        persisted_student = self.student_repository.update(migrated_student.model_copy(update=student_updates))
+
+        existing_embedding = self.face_embedding_repository.get_by_student_id(persisted_student.id)
+        if existing_embedding and existing_embedding.source_image_path:
+            next_source = path_remap.get(existing_embedding.source_image_path)
+            if not next_source and self._is_legacy_path(existing_embedding.source_image_path):
+                legacy_source_filename = Path(existing_embedding.source_image_path).name
+                next_source_candidate = f"{target_dir}/{legacy_source_filename}"
+                if self._move_file_if_exists(existing_embedding.source_image_path, next_source_candidate, move=True):
+                    next_source = next_source_candidate
+            if not next_source and front_exists:
+                next_source = target_front
+            if next_source and next_source != existing_embedding.source_image_path:
+                self.face_embedding_repository.upsert(
+                    existing_embedding.model_copy(
+                        update={
+                            "source_image_path": next_source,
+                            "updated_at": datetime.now(UTC),
+                        }
+                    )
+                )
 
     def _ensure_class_exists(self, class_id: str) -> ClassRecord:
         class_record = self.class_repository.get_by_id(class_id)
@@ -268,15 +407,58 @@ class StudentService:
             raise AppError(404, "Turma não encontrada.")
         return class_record
 
-    def _save_photo(
+    def _move_file_if_exists(self, source_relative: str | None, target_relative: str, *, move: bool) -> bool:
+        if not source_relative:
+            return False
+        source_absolute = self.settings.photos_root_path / source_relative
+        target_absolute = self.settings.photos_root_path / target_relative
+
+        if source_absolute.resolve() == target_absolute.resolve():
+            return source_absolute.exists() and source_absolute.is_file()
+        if not source_absolute.exists() or not source_absolute.is_file():
+            return False
+
+        target_absolute.parent.mkdir(parents=True, exist_ok=True)
+        if target_absolute.exists() and target_absolute.is_file():
+            target_absolute.unlink()
+
+        if move:
+            source_absolute.replace(target_absolute)
+        else:
+            shutil.copy2(source_absolute, target_absolute)
+        return True
+
+    def _copy_file_if_exists(self, source_relative: str, target_relative: str) -> bool:
+        return self._move_file_if_exists(source_relative, target_relative, move=False)
+
+    def _file_exists(self, relative_path: str) -> bool:
+        absolute_path = self.settings.photos_root_path / relative_path
+        return absolute_path.exists() and absolute_path.is_file()
+
+    def _is_legacy_student_media(self, student: StudentRecord) -> bool:
+        if not student.media_folder:
+            return True
+        for path in (student.photo_path, student.photo_right_path, student.photo_left_path):
+            if self._is_legacy_path(path):
+                return True
+        return False
+
+    @staticmethod
+    def _is_legacy_path(path: str | None) -> bool:
+        if not path:
+            return False
+        return len(Path(path).parts) < 4
+
+    def _save_named_photo(
         self,
-        student_id: str,
+        student: StudentRecord,
+        class_record: ClassRecord,
         image_bytes: bytes,
-        *,
-        pose: PhotoPose,
+        filename: str,
     ) -> str:
-        class_record = self._ensure_class_exists(self.get_student_record(student_id).class_id)
-        relative_path = build_photo_relative_path(class_record, student_id, ".jpg", pose=pose)
+        if not student.media_folder:
+            raise AppError(500, "Pasta de mídia do aluno não definida.")
+        relative_path = build_photo_relative_path(class_record, student.media_folder, filename)
         absolute_path = self.settings.photos_root_path / relative_path
         absolute_path.parent.mkdir(parents=True, exist_ok=True)
         absolute_path.write_bytes(image_bytes)
@@ -286,97 +468,180 @@ class StudentService:
         if not relative_path:
             return
         absolute_path = self.settings.photos_root_path / relative_path
-        if absolute_path.exists():
+        if absolute_path.exists() and absolute_path.is_file():
             absolute_path.unlink()
 
-    def _move_student_media_if_needed(self, student: StudentRecord, class_record: ClassRecord) -> StudentRecord:
-        if not any((student.photo_path, student.photo_right_path, student.photo_left_path)):
-            return student
+    def _delete_student_media_directory(self, student: StudentRecord) -> None:
+        class_record = self.class_repository.get_by_id(student.class_id)
+        relative_dir = None
+        if class_record and student.media_folder:
+            relative_dir = build_student_media_directory(class_record, student.media_folder)
+        if not relative_dir:
+            relative_dir = self._resolve_student_media_dir_from_paths(student)
+        if not relative_dir:
+            return
 
-        previous_paths = {
-            "photo_path": student.photo_path,
-            "photo_right_path": student.photo_right_path,
-            "photo_left_path": student.photo_left_path,
-        }
-        next_paths = {
-            "photo_path": self._move_photo_for_class(student.id, student.photo_path, class_record, pose="front"),
-            "photo_right_path": self._move_photo_for_class(
-                student.id, student.photo_right_path, class_record, pose="right"
-            ),
-            "photo_left_path": self._move_photo_for_class(student.id, student.photo_left_path, class_record, pose="left"),
-        }
+        absolute_dir = self.settings.photos_root_path / relative_dir
+        if absolute_dir.exists() and absolute_dir.is_dir():
+            shutil.rmtree(absolute_dir, ignore_errors=True)
 
-        student_updates = {
-            field_name: next_value
-            for field_name, next_value in next_paths.items()
-            if next_value != previous_paths[field_name]
-        }
-        if not student_updates:
-            return student
+    def _relocate_student_media(
+        self,
+        previous_student: StudentRecord,
+        updated_student: StudentRecord,
+        target_class: ClassRecord | None = None,
+    ) -> StudentRecord:
+        class_record = target_class or self._ensure_class_exists(updated_student.class_id)
+        previous_dir = self._resolve_student_media_dir_from_paths(previous_student)
+        target_dir = (
+            build_student_media_directory(class_record, updated_student.media_folder)
+            if updated_student.media_folder
+            else None
+        )
 
-        moved_path_map = {
-            previous_paths[field_name]: next_value
-            for field_name, next_value in student_updates.items()
-            if previous_paths[field_name]
-        }
+        if previous_dir and target_dir and previous_dir != target_dir:
+            previous_absolute_dir = self.settings.photos_root_path / previous_dir
+            target_absolute_dir = self.settings.photos_root_path / target_dir
+            if previous_absolute_dir.exists() and previous_absolute_dir.is_dir():
+                target_absolute_dir.parent.mkdir(parents=True, exist_ok=True)
+                if target_absolute_dir.exists():
+                    shutil.rmtree(target_absolute_dir, ignore_errors=True)
+                previous_absolute_dir.replace(target_absolute_dir)
 
-        student_updates["updated_at"] = datetime.now(UTC)
-        updated_student = self.student_repository.update(student.model_copy(update=student_updates))
-        existing_embedding = self.face_embedding_repository.get_by_student_id(student.id)
+        path_updates = self._rebase_student_paths(previous_student, target_dir)
+        if not path_updates:
+            return updated_student
+
+        persisted = self.student_repository.update(
+            updated_student.model_copy(update={**path_updates, "updated_at": datetime.now(UTC)})
+        )
+        existing_embedding = self.face_embedding_repository.get_by_student_id(updated_student.id)
         if (
             existing_embedding
             and existing_embedding.source_image_path
-            and existing_embedding.source_image_path in moved_path_map
+            and previous_dir
+            and target_dir
+            and existing_embedding.source_image_path.startswith(f"{previous_dir}/")
         ):
+            new_source_path = f"{target_dir}/{existing_embedding.source_image_path.removeprefix(f'{previous_dir}/')}"
             self.face_embedding_repository.upsert(
                 existing_embedding.model_copy(
                     update={
-                        "source_image_path": moved_path_map[existing_embedding.source_image_path],
+                        "source_image_path": new_source_path,
                         "updated_at": datetime.now(UTC),
                     }
                 )
             )
-        return updated_student
+        return persisted
+
+    def _rebase_student_paths(self, student: StudentRecord, target_dir: str | None) -> dict[str, str | None]:
+        if not target_dir:
+            return {}
+
+        updates: dict[str, str | None] = {}
+        for field_name in ("photo_path", "photo_right_path", "photo_left_path"):
+            current_path = getattr(student, field_name)
+            if not current_path:
+                continue
+            current_parts = Path(current_path).parts
+            filename = Path(current_path).name
+            if len(current_parts) >= 4:
+                current_dir = Path(current_path).parent.as_posix()
+                rebased_path = f"{target_dir}/{filename}"
+                if current_dir != target_dir and rebased_path != current_path:
+                    updates[field_name] = rebased_path
+            else:
+                updates[field_name] = f"{target_dir}/{filename}"
+                source_absolute_path = self.settings.photos_root_path / current_path
+                target_absolute_path = self.settings.photos_root_path / updates[field_name]
+                if source_absolute_path.exists() and source_absolute_path.is_file():
+                    target_absolute_path.parent.mkdir(parents=True, exist_ok=True)
+                    if target_absolute_path.exists():
+                        target_absolute_path.unlink()
+                    source_absolute_path.replace(target_absolute_path)
+        return updates
+
+    def _ensure_student_media_folder(self, student: StudentRecord, class_record: ClassRecord) -> StudentRecord:
+        if student.media_folder:
+            return student
+
+        inferred = self._infer_media_folder(student)
+        next_media_folder = inferred or self._build_unique_media_folder(
+            class_record.id,
+            student.full_name,
+            exclude_student_id=student.id,
+        )
+        updated = self.student_repository.update(
+            student.model_copy(update={"media_folder": next_media_folder, "updated_at": datetime.now(UTC)})
+        )
+        return self._relocate_student_media(student, updated, target_class=class_record)
+
+    def _build_unique_media_folder(
+        self,
+        class_id: str,
+        full_name: str,
+        *,
+        exclude_student_id: str | None,
+    ) -> str:
+        base_folder = slugify_segment(full_name)
+        students = self.student_repository.list_by_class_id(class_id)
+        used_folders: set[str] = set()
+        for item in students:
+            if exclude_student_id and item.id == exclude_student_id:
+                continue
+            item_folder = item.media_folder or self._infer_media_folder(item)
+            if item_folder:
+                used_folders.add(item_folder.casefold())
+
+        candidate = base_folder
+        suffix = 1
+        while candidate.casefold() in used_folders:
+            candidate = f"{base_folder}-{suffix}"
+            suffix += 1
+        return candidate
 
     @staticmethod
-    def _resolve_capture_pose(filename: str | None) -> CapturePose:
+    def _resolve_capture_kind(filename: str | None) -> tuple[CaptureKind, int | None, int | None]:
         if not filename:
-            return "unknown"
+            return "unknown", None, None
 
-        normalized_name = Path(filename).stem.casefold()
-        if any(token in normalized_name for token in ("right", "direita")):
-            return "right"
-        if any(token in normalized_name for token in ("left", "esquerda")):
-            return "left"
-        if any(token in normalized_name for token in ("front", "frente", "principal", "main")):
-            return "front"
-        return "unknown"
+        stem = Path(filename).stem.casefold()
+        if any(token in stem for token in ("right", "direita")):
+            return "right", None, None
+        if any(token in stem for token in ("left", "esquerda")):
+            return "left", None, None
+        if any(token in stem for token in ("front", "frente", "principal", "main")):
+            return "front", None, None
+        if "cycle-" in stem:
+            parts = stem.replace("_", "-").split("-")
+            try:
+                cycle = int(parts[-2])
+                index = int(parts[-1])
+                return "sample", max(1, cycle), max(1, index)
+            except (ValueError, IndexError):
+                return "sample", None, None
+        return "unknown", None, None
 
-    def _move_photo_for_class(
-        self,
-        student_id: str,
-        current_relative_path: str | None,
-        class_record: ClassRecord,
-        *,
-        pose: PhotoPose,
-    ) -> str | None:
-        if not current_relative_path:
+    @staticmethod
+    def _infer_media_folder(student: StudentRecord) -> str | None:
+        media_dir = StudentService._resolve_student_media_dir_from_paths(student)
+        if not media_dir:
             return None
+        parts = Path(media_dir).parts
+        if len(parts) < 3:
+            return None
+        return str(parts[-1])
 
-        current_absolute_path = self.settings.photos_root_path / current_relative_path
-        extension = Path(current_relative_path).suffix.lower() or ".jpg"
-        next_relative_path = build_photo_relative_path(class_record, student_id, extension, pose=pose)
-        if next_relative_path == current_relative_path:
-            return current_relative_path
-        if not current_absolute_path.exists():
-            return current_relative_path
-
-        next_absolute_path = self.settings.photos_root_path / next_relative_path
-        next_absolute_path.parent.mkdir(parents=True, exist_ok=True)
-        if next_absolute_path.exists() and next_absolute_path != current_absolute_path:
-            next_absolute_path.unlink()
-        current_absolute_path.replace(next_absolute_path)
-        return next_relative_path
+    @staticmethod
+    def _resolve_student_media_dir_from_paths(student: StudentRecord) -> str | None:
+        for relative_path in (student.photo_path, student.photo_right_path, student.photo_left_path):
+            if not relative_path:
+                continue
+            path = Path(relative_path)
+            parts = path.parts
+            if len(parts) >= 4:
+                return path.parent.as_posix()
+        return None
 
     @staticmethod
     def _normalize_and_validate_cpf(value: str) -> str:

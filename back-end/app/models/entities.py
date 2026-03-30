@@ -33,7 +33,7 @@ class RecognitionStatus(str, Enum):
 
 
 class UserRecord(BaseModel):
-    id: str
+    id: str = ""
     username: str
     full_name: str
     role: UserRole
@@ -44,7 +44,7 @@ class UserRecord(BaseModel):
 
 
 class ClassRecord(BaseModel):
-    id: str
+    id: str = ""
     name: str
     school_year: SchoolYear
     created_at: datetime
@@ -52,10 +52,11 @@ class ClassRecord(BaseModel):
 
 
 class StudentRecord(BaseModel):
-    id: str
+    id: str = ""
     full_name: str
     class_id: str
-    cpf: str | None = None
+    cpf: str
+    media_folder: str | None = None
     photo_path: str | None = None
     photo_right_path: str | None = None
     photo_left_path: str | None = None
@@ -64,7 +65,7 @@ class StudentRecord(BaseModel):
 
 
 class FaceEmbeddingRecord(BaseModel):
-    id: str
+    id: str = ""
     student_id: str
     engine: str
     vector: list[float] = Field(default_factory=list)
@@ -75,7 +76,7 @@ class FaceEmbeddingRecord(BaseModel):
 
 
 class RecognitionAttemptRecord(BaseModel):
-    id: str
+    id: str = ""
     status: RecognitionStatus
     confidence: float | None = None
     student_id: str | None = None
@@ -84,7 +85,7 @@ class RecognitionAttemptRecord(BaseModel):
 
 
 class MealEntryRecord(BaseModel):
-    id: str
+    id: str = ""
     student_id: str
     student_name: str
     class_id: str
