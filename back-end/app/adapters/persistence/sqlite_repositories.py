@@ -13,6 +13,7 @@ from app.adapters.persistence.sqlite_store import (
 from app.models.entities import (
     ClassRecord,
     FaceEmbeddingRecord,
+    FaceEmbeddingSampleRecord,
     MealEntryRecord,
     RecognitionAttemptRecord,
     SchoolYear,
@@ -24,6 +25,7 @@ from app.repositories.contracts import (
     AppSettingsRepository,
     ClassRepository,
     FaceEmbeddingRepository,
+    FaceEmbeddingSampleRepository,
     MealEntryFilters,
     MealEntryRepository,
     RecognitionAttemptRepository,
@@ -536,6 +538,181 @@ class SqliteFaceEmbeddingRepository(FaceEmbeddingRepository):
             vector=vector if isinstance(vector, list) else [],
             samples_count=int(row["samples_count"]),
             source_image_path=row["source_image_path"],
+            created_at=parse_datetime(row["created_at"]),
+            updated_at=parse_datetime(row["updated_at"]),
+        )
+
+
+class SqliteFaceEmbeddingSampleRepository(FaceEmbeddingSampleRepository):
+    def __init__(self, store: SqliteStore) -> None:
+        self.store = store
+
+    def list_by_student_id(self, student_id: str) -> list[FaceEmbeddingSampleRecord]:
+        parsed_student_id = parse_db_id(student_id)
+        if parsed_student_id is None:
+            return []
+        with self.store.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT
+                    id,
+                    student_id,
+                    engine,
+                    vector_json,
+                    source_image_path,
+                    quality_score,
+                    created_at,
+                    updated_at
+                FROM face_embedding_samples
+                WHERE student_id = ?
+                """,
+                (parsed_student_id,),
+            ).fetchall()
+        return [self._to_record(row) for row in rows]
+
+    def list_by_student_ids(self, student_ids: list[str]) -> list[FaceEmbeddingSampleRecord]:
+        parsed_ids = [item for item in (parse_db_id(student_id) for student_id in student_ids) if item is not None]
+        if not parsed_ids:
+            return []
+        placeholders = ", ".join("?" for _ in parsed_ids)
+        with self.store.connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT
+                    id,
+                    student_id,
+                    engine,
+                    vector_json,
+                    source_image_path,
+                    quality_score,
+                    created_at,
+                    updated_at
+                FROM face_embedding_samples
+                WHERE student_id IN ({placeholders})
+                """,
+                parsed_ids,
+            ).fetchall()
+        return [self._to_record(row) for row in rows]
+
+    def upsert(self, sample: FaceEmbeddingSampleRecord) -> FaceEmbeddingSampleRecord:
+        parsed_student_id = parse_db_id(sample.student_id)
+        if parsed_student_id is None:
+            return sample
+
+        with self.store.connect() as connection:
+            existing = connection.execute(
+                """
+                SELECT id, created_at
+                FROM face_embedding_samples
+                WHERE student_id = ? AND source_image_path = ?
+                """,
+                (parsed_student_id, sample.source_image_path),
+            ).fetchone()
+
+            if existing:
+                sample_id = format_api_id(existing["id"])
+                created_at_value = parse_datetime(existing["created_at"])
+                connection.execute(
+                    """
+                    UPDATE face_embedding_samples
+                    SET engine = ?, vector_json = ?, quality_score = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        sample.engine,
+                        json.dumps(sample.vector),
+                        float(sample.quality_score),
+                        format_datetime(sample.updated_at),
+                        int(existing["id"]),
+                    ),
+                )
+                connection.commit()
+                return sample.model_copy(update={"id": sample_id, "created_at": created_at_value})
+
+            cursor = connection.execute(
+                """
+                INSERT INTO face_embedding_samples (
+                    student_id,
+                    engine,
+                    vector_json,
+                    source_image_path,
+                    quality_score,
+                    created_at,
+                    updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    parsed_student_id,
+                    sample.engine,
+                    json.dumps(sample.vector),
+                    sample.source_image_path,
+                    float(sample.quality_score),
+                    format_datetime(sample.created_at),
+                    format_datetime(sample.updated_at),
+                ),
+            )
+            connection.commit()
+            return sample.model_copy(update={"id": format_api_id(cursor.lastrowid)})
+
+    def replace_for_student(self, student_id: str, samples: list[FaceEmbeddingSampleRecord]) -> None:
+        parsed_student_id = parse_db_id(student_id)
+        if parsed_student_id is None:
+            return
+
+        with self.store.connect() as connection:
+            connection.execute(
+                "DELETE FROM face_embedding_samples WHERE student_id = ?",
+                (parsed_student_id,),
+            )
+            for sample in samples:
+                connection.execute(
+                    """
+                    INSERT INTO face_embedding_samples (
+                        student_id,
+                        engine,
+                        vector_json,
+                        source_image_path,
+                        quality_score,
+                        created_at,
+                        updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        parsed_student_id,
+                        sample.engine,
+                        json.dumps(sample.vector),
+                        sample.source_image_path,
+                        float(sample.quality_score),
+                        format_datetime(sample.created_at),
+                        format_datetime(sample.updated_at),
+                    ),
+                )
+            connection.commit()
+
+    def delete_by_student_id(self, student_id: str) -> None:
+        parsed_student_id = parse_db_id(student_id)
+        if parsed_student_id is None:
+            return
+        with self.store.connect() as connection:
+            connection.execute(
+                "DELETE FROM face_embedding_samples WHERE student_id = ?",
+                (parsed_student_id,),
+            )
+            connection.commit()
+
+    @staticmethod
+    def _to_record(row) -> FaceEmbeddingSampleRecord:
+        vector_raw = row["vector_json"]
+        vector = json.loads(vector_raw) if vector_raw else []
+        return FaceEmbeddingSampleRecord(
+            id=format_api_id(row["id"]),
+            student_id=format_api_id(row["student_id"]),
+            engine=row["engine"],
+            vector=vector if isinstance(vector, list) else [],
+            source_image_path=str(row["source_image_path"]),
+            quality_score=float(row["quality_score"] or 0.0),
             created_at=parse_datetime(row["created_at"]),
             updated_at=parse_datetime(row["updated_at"]),
         )

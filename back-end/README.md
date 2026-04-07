@@ -7,7 +7,7 @@ Ele centraliza:
 
 - autenticação de usuários
 - cadastro de alunos e turmas
-- matrícula facial (3 fotos ou 100 fotos)
+- matrícula facial (3 fotos ou 50 fotos)
 - reconhecimento facial e validação por CPF
 - registro de refeições e bloqueio de duplicidade
 - estatísticas e configurações do sistema

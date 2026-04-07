@@ -39,7 +39,7 @@ export default function Home() {
           <section className="overflow-hidden rounded-[2rem] border border-white/80 bg-white/85 p-8 shadow-2xl shadow-slate-200 backdrop-blur lg:p-10">
             <div className="inline-flex items-center gap-2 rounded-full bg-orange-100 px-4 py-2 text-sm font-semibold text-orange-700">
               <Sparkles className="h-4 w-4" />
-              Bem-vindo ao projeto
+              Bem-vindo
             </div>
 
             <h2 className="mt-6 max-w-3xl text-4xl font-black tracking-tight text-slate-950 lg:text-5xl">

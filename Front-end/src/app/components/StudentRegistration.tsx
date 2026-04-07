@@ -26,9 +26,9 @@ const STEPS_3: CaptureStep[] = [
 ];
 const STEP_LABELS_3 = ["Foto frontal", "Foto direita", "Foto esquerda"] as const;
 
-const TOTAL_100 = 100;
+const TOTAL_100 = 50;
 const CYCLE_SIZE = 25;
-const CYCLES = 4;
+const CYCLES = 2;
 const INSTRUCTION_100 = "Durante a foto, faça leves movimentos de cabeça para os dois lados, indo e voltando.";
 
 function emptyPhotos(total: number) {
@@ -37,6 +37,18 @@ function emptyPhotos(total: number) {
 
 function revoke(previewUrl: string | null | undefined) {
   if (previewUrl?.startsWith("blob:")) URL.revokeObjectURL(previewUrl);
+}
+
+function withCacheBust(url: string | null | undefined, versionHint?: string | number | null) {
+  if (!url) return null;
+  const separator = url.includes("?") ? "&" : "?";
+  const version = encodeURIComponent(String(versionHint ?? Date.now()));
+  return `${url}${separator}v=${version}`;
+}
+
+function studentPhotoVersion(student: Pick<StudentItem, "id" | "updated_at"> | null | undefined) {
+  if (!student) return null;
+  return `${student.id}-${student.updated_at}`;
 }
 
 function stepDirection(stepId: string): CameraGuideDirection {
@@ -69,7 +81,10 @@ function totalByMode(mode: RegistrationCaptureMode) {
 
 async function fetchCapturePhoto(url: string, filename: string): Promise<CapturePhoto | null> {
   try {
-    const response = await fetch(url, { credentials: "same-origin" });
+    const response = await fetch(withCacheBust(url, Date.now()) ?? url, {
+      credentials: "same-origin",
+      cache: "no-store",
+    });
     if (!response.ok) return null;
     const blob = await response.blob();
     const type = blob.type || "image/jpeg";
@@ -344,40 +359,43 @@ export default function StudentRegistration() {
   };
 
   const clearPhotos = (scope: ClearScope, clearNameAndCpf: boolean, cycleNumber?: number) => {
-    let hasCleared = false;
+    const currentPhotos = photosRef.current;
+    const isFullClear = scope === "all" || !isHundred;
+    const selectedCycle = cycleNumber ?? 1;
+    const cycleIndex = Math.min(Math.max(selectedCycle, 1), CYCLES) - 1;
+    const start = cycleIndex * CYCLE_SIZE;
+    const end = start + CYCLE_SIZE;
+    const hasCleared = isFullClear
+      ? currentPhotos.some(Boolean)
+      : currentPhotos.slice(start, end).some(Boolean);
     setPhotos((current) => {
       const next = [...current];
-      if (scope === "all" || !isHundred) {
+      if (isFullClear) {
         next.forEach((photo) => revoke(photo?.previewUrl));
         return emptyPhotos(totalRequired);
       }
 
-      const selectedCycle = cycleNumber ?? 1;
-      const cycleIndex = Math.min(Math.max(selectedCycle, 1), CYCLES) - 1;
-      const start = cycleIndex * CYCLE_SIZE;
-      const end = start + CYCLE_SIZE;
       for (let index = start; index < end; index += 1) {
         if (next[index]) {
           revoke(next[index]?.previewUrl);
           next[index] = null;
-          hasCleared = true;
         }
       }
       return next;
     });
 
     setIsCameraOpen(false);
-    setActiveIndex(scope === "all" || !isHundred ? 0 : ((cycleNumber ?? 1) - 1) * CYCLE_SIZE);
+    setActiveIndex(isFullClear ? 0 : (selectedCycle - 1) * CYCLE_SIZE);
     setRetryTargetIndex(null);
 
-    if ((scope === "all" || !isHundred) && clearNameAndCpf) clearNameAndCpfFields();
+    if (isFullClear && clearNameAndCpf) clearNameAndCpfFields();
 
-    if (scope === "all" || !isHundred) {
+    if (isFullClear) {
       setStatusMessage("Capturas limpas.");
     } else if (hasCleared) {
-      setStatusMessage(`Ciclo ${cycleNumber ?? 1} limpo.`);
+      setStatusMessage(`Ciclo ${selectedCycle} limpo.`);
     } else {
-      setStatusMessage(`Ciclo ${cycleNumber ?? 1} já estava vazio.`);
+      setStatusMessage(`Ciclo ${selectedCycle} já estava vazio.`);
     }
     setErrorMessage("");
   };
@@ -397,7 +415,6 @@ export default function StudentRegistration() {
     if (clearScope === "all" && clearFormFields === null) return;
     if (clearScope === "cycle" && (clearCycle === null || !isHundred)) return;
     const shouldClearNameAndCpf = clearScope === "all" && clearFormFields === true;
-    if (shouldClearNameAndCpf) clearNameAndCpfFields();
     clearPhotos(
       clearScope,
       shouldClearNameAndCpf,
@@ -435,7 +452,7 @@ export default function StudentRegistration() {
       setIsCameraOpen(false);
       setStatusMessage(
         nextMode === "hundred_photos"
-          ? "Recaptura em 100 fotos pronta. Continue do ponto carregado."
+          ? "Recaptura em 50 fotos pronta. Continue do ponto carregado."
           : "Recaptura em 3 fotos pronta. Revise frente, direita e esquerda.",
       );
     } catch (error) {
@@ -456,7 +473,7 @@ export default function StudentRegistration() {
       } else {
         const firstPending = photos.findIndex((photo) => !photo);
         if (firstPending < 0) {
-          setStatusMessage("As 100 fotos já foram capturadas.");
+          setStatusMessage("As 50 fotos já foram capturadas.");
           return;
         }
         setActiveIndex(firstPending);
@@ -511,6 +528,7 @@ export default function StudentRegistration() {
 
   const retryFromFailedCapture = (failedIndex: number, message: string) => {
     if (failedIndex < 0 || failedIndex >= totalRequired) return;
+    const label = enrollmentProgressLabel(failedIndex, mode);
     setPhotos((current) => {
       const next = [...current];
       revoke(next[failedIndex]?.previewUrl);
@@ -520,7 +538,7 @@ export default function StudentRegistration() {
     setActiveIndex(failedIndex);
     setRetryTargetIndex(failedIndex);
     setIsCameraOpen(true);
-    setStatusMessage(`Falha ao processar a foto ${failedIndex + 1}. Tire novamente.`);
+    setStatusMessage(`Falha ao processar ${label}. Tire novamente.`);
     setErrorMessage(message);
   };
 
@@ -549,7 +567,7 @@ export default function StudentRegistration() {
 
     if (isHundred) {
       if (allDone) {
-        setStatusMessage("Captura concluída. As 100 fotos foram salvas.");
+        setStatusMessage("Captura concluída. As 50 fotos foram salvas.");
         setIsCameraOpen(false);
         return;
       }
@@ -718,7 +736,7 @@ export default function StudentRegistration() {
           <div className="rounded-[1.75rem] border border-slate-200 bg-slate-50 p-4">
             <div className="rounded-[1.5rem] border border-slate-200 bg-white px-4 py-4">
               <p className="text-xs font-semibold uppercase tracking-[0.24em] text-orange-500">Captura facial</p>
-              <p className="mt-2 text-base font-black text-slate-900">{isHundred ? "100 fotos para o cadastro." : isCameraOpen ? activeStep.title : "3 fotos para o cadastro."}</p>
+              <p className="mt-2 text-base font-black text-slate-900">{isHundred ? "50 fotos para o cadastro." : isCameraOpen ? activeStep.title : "3 fotos para o cadastro."}</p>
               <p className="mt-1 text-sm text-slate-500">{isHundred ? INSTRUCTION_100 : activeStep.instruction}</p>
               <div className="mt-3 text-sm font-black text-orange-700">{capturedCount}/{totalRequired}</div>
               {!isHundred ? (
@@ -769,8 +787,8 @@ export default function StudentRegistration() {
                   faceGuardMode="required"
                   uiVariant="registration"
                   captureInteraction={isHundred ? "hold" : "tap"}
-                  captureIntervalMs={isHundred ? 280 : 350}
-                  captureCooldownMs={isHundred ? 450 : 1200}
+                  captureIntervalMs={isHundred ? 220 : 280}
+                  captureCooldownMs={isHundred ? 360 : 800}
                 />
               </div>
             ) : (
@@ -803,7 +821,7 @@ export default function StudentRegistration() {
             <select value={recentClass} onChange={(e) => setRecentClass(e.target.value)} className="w-full rounded-xl border border-slate-300 bg-white px-4 py-3"><option value="all">Turma: Todas</option>{recentClassOptions.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select>
           </div>
           <div className="mt-4 space-y-3">
-            {isLoading ? <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-4 text-sm text-slate-500">Carregando alunos...</div> : filteredRecentStudents.length === 0 ? <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-4 text-sm text-slate-500">Nenhum aluno cadastrado ainda.</div> : <div className="max-h-[28rem] space-y-3 overflow-y-auto pr-1">{filteredRecentStudents.map((student) => <button key={student.id} type="button" onClick={() => setSelectedStudentId(student.id)} className={`flex min-h-20 w-full items-center gap-4 rounded-2xl border p-4 text-left ${student.id === selectedStudent?.id ? "border-orange-300 bg-orange-50" : "border-slate-200 bg-slate-50"}`}>{student.photo_url ? <img src={student.photo_url} alt={student.full_name} className="h-12 w-12 rounded-2xl object-cover" /> : <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-slate-200 text-slate-500"><UserRound className="h-5 w-5" /></div>}<div><p className="font-semibold text-slate-900">{student.full_name}</p><p className="text-sm text-slate-600">{student.class_name}</p></div></button>)}</div>}
+            {isLoading ? <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-4 text-sm text-slate-500">Carregando alunos...</div> : filteredRecentStudents.length === 0 ? <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-4 text-sm text-slate-500">Nenhum aluno cadastrado ainda.</div> : <div className="max-h-[28rem] space-y-3 overflow-y-auto pr-1">{filteredRecentStudents.map((student) => <button key={student.id} type="button" onClick={() => setSelectedStudentId(student.id)} className={`flex min-h-20 w-full items-center gap-4 rounded-2xl border p-4 text-left ${student.id === selectedStudent?.id ? "border-orange-300 bg-orange-50" : "border-slate-200 bg-slate-50"}`}>{student.photo_url ? <img src={withCacheBust(student.photo_url, studentPhotoVersion(student)) ?? student.photo_url} alt={student.full_name} className="h-12 w-12 rounded-2xl object-cover" /> : <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-slate-200 text-slate-500"><UserRound className="h-5 w-5" /></div>}<div><p className="font-semibold text-slate-900">{student.full_name}</p><p className="text-sm text-slate-600">{student.class_name}</p></div></button>)}</div>}
           </div>
         </div>
 
@@ -811,7 +829,7 @@ export default function StudentRegistration() {
           <div className="rounded-[2rem] border border-slate-200 bg-white p-6 shadow-lg shadow-slate-200">
             <p className="text-sm font-semibold uppercase tracking-[0.25em] text-slate-500">Aluno selecionado</p>
             <div className="mt-3 flex items-center gap-4">
-              {selectedStudent.photo_url ? <img src={selectedStudent.photo_url} alt={selectedStudent.full_name} className="h-16 w-16 rounded-2xl object-cover" /> : <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-slate-200 text-slate-500"><UserRound className="h-6 w-6" /></div>}
+              {selectedStudent.photo_url ? <img src={withCacheBust(selectedStudent.photo_url, studentPhotoVersion(selectedStudent)) ?? selectedStudent.photo_url} alt={selectedStudent.full_name} className="h-16 w-16 rounded-2xl object-cover" /> : <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-slate-200 text-slate-500"><UserRound className="h-6 w-6" /></div>}
               <div><p className="font-black text-slate-900">{selectedStudent.full_name}</p><p className="text-sm text-slate-500">{selectedStudent.class_name}</p></div>
             </div>
             <button
@@ -848,7 +866,7 @@ export default function StudentRegistration() {
                 onClick={() => void beginReenroll("hundred_photos")}
                 className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4 text-sm font-semibold text-slate-800"
               >
-                100 fotos
+                50 fotos
               </button>
             </div>
             <div className="mt-6">

@@ -8,6 +8,8 @@ const getMealScheduleMock = vi.fn();
 const setMealScheduleMock = vi.fn();
 const getPermissionsMock = vi.fn();
 const setPermissionsMock = vi.fn();
+const getEmbeddingsRebuildStatusMock = vi.fn();
+const startEmbeddingsRebuildMock = vi.fn();
 const listUsersMock = vi.fn();
 
 vi.mock("../hooks/useAuth", () => ({
@@ -31,6 +33,8 @@ vi.mock("../lib/api", () => ({
     setMealSchedule: (...args: unknown[]) => setMealScheduleMock(...args),
     getPermissions: (...args: unknown[]) => getPermissionsMock(...args),
     setPermissions: (...args: unknown[]) => setPermissionsMock(...args),
+    getEmbeddingsRebuildStatus: (...args: unknown[]) => getEmbeddingsRebuildStatusMock(...args),
+    startEmbeddingsRebuild: (...args: unknown[]) => startEmbeddingsRebuildMock(...args),
   },
   usersApi: {
     list: (...args: unknown[]) => listUsersMock(...args),
@@ -62,6 +66,8 @@ describe("ConfigurationPanel role visibility", () => {
     setMealScheduleMock.mockReset();
     getPermissionsMock.mockReset();
     setPermissionsMock.mockReset();
+    getEmbeddingsRebuildStatusMock.mockReset();
+    startEmbeddingsRebuildMock.mockReset();
     listUsersMock.mockReset();
 
     getRegistrationCaptureModeMock.mockResolvedValue({ mode: "hundred_photos" });
@@ -123,6 +129,28 @@ describe("ConfigurationPanel role visibility", () => {
         },
       },
       user_overrides: {},
+    });
+    getEmbeddingsRebuildStatusMock.mockResolvedValue({
+      running: false,
+      total_students: 0,
+      processed_students: 0,
+      total_samples: 0,
+      processed_samples: 0,
+      failed_students: 0,
+      started_at: null,
+      finished_at: null,
+      last_error: null,
+    });
+    startEmbeddingsRebuildMock.mockResolvedValue({
+      running: true,
+      total_students: 10,
+      processed_students: 0,
+      total_samples: 500,
+      processed_samples: 0,
+      failed_students: 0,
+      started_at: "2026-03-31T12:00:00+00:00",
+      finished_at: null,
+      last_error: null,
     });
   });
 

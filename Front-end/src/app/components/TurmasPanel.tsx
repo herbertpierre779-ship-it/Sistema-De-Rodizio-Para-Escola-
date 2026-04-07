@@ -14,6 +14,25 @@ function isMobileViewport() {
   return typeof window !== "undefined" && window.matchMedia("(max-width: 1279px)").matches;
 }
 
+function withCacheBust(url: string | null, versionHint?: string | null) {
+  if (!url) {
+    return null;
+  }
+  const version = (versionHint ?? "").trim();
+  if (!version) {
+    return url;
+  }
+  const separator = url.includes("?") ? "&" : "?";
+  return `${url}${separator}v=${encodeURIComponent(version)}`;
+}
+
+function studentPhotoVersion(student: Pick<StudentItem, "id" | "updated_at"> | null | undefined) {
+  if (!student) {
+    return null;
+  }
+  return `${student.id}-${student.updated_at}`;
+}
+
 export default function TurmasPanel() {
   const { token, user, effectivePermissions, isLoadingPermissions } = useAuth();
   const { emit } = useFeedback();
@@ -450,7 +469,7 @@ export default function TurmasPanel() {
                   >
                     {student.photo_url ? (
                       <img
-                        src={student.photo_url}
+                        src={withCacheBust(student.photo_url, studentPhotoVersion(student)) ?? student.photo_url}
                         alt={student.full_name}
                         className="h-14 w-14 rounded-2xl object-cover"
                       />
@@ -476,7 +495,7 @@ export default function TurmasPanel() {
             <div className="flex items-start gap-4">
               {selectedStudent?.photo_url ? (
                 <img
-                  src={selectedStudent.photo_url}
+                  src={withCacheBust(selectedStudent.photo_url, studentPhotoVersion(selectedStudent)) ?? selectedStudent.photo_url}
                   alt={selectedStudent.full_name}
                   className="h-20 w-20 rounded-[1.5rem] object-cover shadow-lg shadow-slate-200"
                 />

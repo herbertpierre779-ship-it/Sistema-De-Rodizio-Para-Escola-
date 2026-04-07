@@ -9,7 +9,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     app_name: str = "Cantina API"
     app_env: str = "development"
-    secret_key: str = "troque-esta-chave-em-producao"
+    secret_key: str = "cantina-dev-secret-key-2026-troque-em-producao-32plus"
     token_expire_minutes: int = 720
     jwt_algorithm: str = "HS256"
     frontend_origins_raw: str = (
@@ -32,13 +32,29 @@ class Settings(BaseSettings):
     recognition_attempts_file: str = "back-end/data/recognition_attempts.json"
     keep_legacy_backup: bool = False
     photos_root: str = "fotos"
+    face_models_dir: str = "back-end/models"
     bootstrap_director_username: str = "diretor"
     bootstrap_director_password: str = "123456"
     bootstrap_director_full_name: str = "Diretor Geral"
-    face_engine: str = Field(default="auto", description="auto, mock, opencv, face_recognition")
+    face_engine: str = Field(
+        default="naogazei_face",
+        description="naogazei_face, mock",
+    )
+    recognition_profile: str = Field(
+        default="naogazei_like",
+        description="default, naogazei_like",
+    )
     recognition_match_threshold: float = 0.90
     recognition_low_confidence_threshold: float = 0.75
     recognition_min_score_gap: float = 0.03
+    recognition_naogazei_match_threshold: float = 0.40
+    recognition_naogazei_low_confidence_threshold: float = 0.32
+    recognition_naogazei_candidate_top_k: int = 24
+    recognition_naogazei_top_samples_window: int = 8
+    recognition_naogazei_score_max_weight: float = 0.82
+    recognition_naogazei_score_mean_weight: float = 0.18
+    recognition_naogazei_min_quality_score: float = 0.22
+    recognition_naogazei_stable_sample_limit: int = 32
     school_timezone: str = "America/Sao_Paulo"
 
     model_config = SettingsConfigDict(
@@ -78,6 +94,11 @@ class Settings(BaseSettings):
         return configured if configured.is_absolute() else self.backend_root.parent / configured
 
     @property
+    def face_models_dir_path(self) -> Path:
+        configured = Path(self.face_models_dir)
+        return configured if configured.is_absolute() else self.backend_root.parent / configured
+
+    @property
     def frontend_origins(self) -> list[str]:
         return [origin.strip() for origin in self.frontend_origins_raw.split(",") if origin.strip()]
 
@@ -86,7 +107,12 @@ class Settings(BaseSettings):
         if self.app_env.strip().lower() not in {"prod", "production"}:
             return self
 
-        if self.secret_key.strip() in {"", "troque-esta-chave-em-producao", "troque-esta-chave"}:
+        if self.secret_key.strip() in {
+            "",
+            "troque-esta-chave-em-producao",
+            "troque-esta-chave",
+            "cantina-dev-secret-key-2026-troque-em-producao-32plus",
+        }:
             raise ValueError(
                 "Em produção, configure CANTINA_SECRET_KEY com uma chave forte."
             )

@@ -110,3 +110,15 @@ class PermissionsSettingsUpdateRequest(PermissionsSettingsBase):
 
 class PermissionsEffectiveResponse(BaseModel):
     modules: PermissionMap
+
+
+class EmbeddingsRebuildStatusResponse(BaseModel):
+    running: bool
+    total_students: int
+    processed_students: int
+    total_samples: int
+    processed_samples: int
+    failed_students: int
+    started_at: str | None = None
+    finished_at: str | None = None
+    last_error: str | None = None

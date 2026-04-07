@@ -1,10 +1,11 @@
-import { ArrowLeft, Clock3, Plus, Settings, Shield, Trash2 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { ArrowLeft, Clock3, Plus, RefreshCcw, Settings, Shield, Trash2 } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useAuth } from "../hooks/useAuth";
 import { ApiError, settingsApi, usersApi } from "../lib/api";
 import { DEFAULT_MEAL_SCHEDULE } from "../lib/mealSchedule";
 import type {
   AuthUser,
+  EmbeddingsRebuildStatus,
   MealType,
   PermissionMap,
   PermissionModule,
@@ -60,6 +61,7 @@ export default function ConfigurationPanel({ role, permissions, onOpenUsers }: C
   const canAccessMealSchedule = Boolean(permissions?.config_horarios_refeicoes);
   const canEditMealSchedule = canAccessMealSchedule;
   const canManagePermissions = role === "diretor" && Boolean(permissions?.config_permissoes);
+  const canManageEmbeddings = role === "diretor";
 
   const [view, setView] = useState<ScheduleView>("root");
   const [captureMode, setCaptureMode] = useState<RegistrationCaptureMode>("hundred_photos");
@@ -70,6 +72,10 @@ export default function ConfigurationPanel({ role, permissions, onOpenUsers }: C
   const [isSavingSchedule, setIsSavingSchedule] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
   const [scheduleErrorMessage, setScheduleErrorMessage] = useState("");
+  const [embeddingsStatus, setEmbeddingsStatus] = useState<EmbeddingsRebuildStatus | null>(null);
+  const [isLoadingEmbeddingsStatus, setIsLoadingEmbeddingsStatus] = useState(false);
+  const [isStartingEmbeddingsRebuild, setIsStartingEmbeddingsRebuild] = useState(false);
+  const embeddingsStatusRequestInFlightRef = useRef(false);
 
   const [permissionsSettings, setPermissionsSettings] = useState<PermissionsSettingsResponse | null>(null);
   const [permissionsUsers, setPermissionsUsers] = useState<AuthUser[]>([]);
@@ -136,6 +142,52 @@ export default function ConfigurationPanel({ role, permissions, onOpenUsers }: C
     }
   };
 
+  const loadEmbeddingsStatus = async (options?: { silent?: boolean }) => {
+    if (!token || !canManageEmbeddings) {
+      return;
+    }
+    if (embeddingsStatusRequestInFlightRef.current) {
+      return;
+    }
+    const silent = options?.silent === true;
+    embeddingsStatusRequestInFlightRef.current = true;
+    if (!silent) {
+      setIsLoadingEmbeddingsStatus(true);
+    }
+    try {
+      const response = await settingsApi.getEmbeddingsRebuildStatus(token);
+      setEmbeddingsStatus(response);
+    } catch (error) {
+      setErrorMessage(
+        error instanceof ApiError ? error.message : "Nao foi possivel carregar o status de embeddings.",
+      );
+    } finally {
+      embeddingsStatusRequestInFlightRef.current = false;
+      if (!silent) {
+        setIsLoadingEmbeddingsStatus(false);
+      }
+    }
+  };
+
+  useEffect(() => {
+    if (!token || !canManageEmbeddings) {
+      return;
+    }
+    void loadEmbeddingsStatus();
+  }, [token, canManageEmbeddings]);
+
+  useEffect(() => {
+    if (!token || !canManageEmbeddings || !embeddingsStatus?.running) {
+      return;
+    }
+    const intervalId = window.setInterval(() => {
+      void loadEmbeddingsStatus({ silent: true });
+    }, 1500);
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [token, canManageEmbeddings, embeddingsStatus?.running]);
+
   const selectedOverrideUser = useMemo(
     () => permissionsUsers.find((userItem) => userItem.id === selectedUserOverrideId) ?? null,
     [permissionsUsers, selectedUserOverrideId],
@@ -174,6 +226,24 @@ export default function ConfigurationPanel({ role, permissions, onOpenUsers }: C
       setErrorMessage(error instanceof ApiError ? error.message : "Não foi possível salvar a configuração.");
     } finally {
       setIsSavingMode(false);
+    }
+  };
+
+  const handleStartEmbeddingsRebuild = async () => {
+    if (!token || !canManageEmbeddings || isStartingEmbeddingsRebuild) {
+      return;
+    }
+    setErrorMessage("");
+    setIsStartingEmbeddingsRebuild(true);
+    try {
+      const response = await settingsApi.startEmbeddingsRebuild(token);
+      setEmbeddingsStatus(response);
+    } catch (error) {
+      setErrorMessage(
+        error instanceof ApiError ? error.message : "Nao foi possivel iniciar a regeneracao de embeddings.",
+      );
+    } finally {
+      setIsStartingEmbeddingsRebuild(false);
     }
   };
 
@@ -702,8 +772,8 @@ export default function ConfigurationPanel({ role, permissions, onOpenUsers }: C
                     : "border-slate-200 bg-white hover:bg-slate-50"
                 } disabled:cursor-not-allowed disabled:opacity-60`}
               >
-                <p className="text-sm font-black text-slate-900">100 fotos</p>
-                <p className="mt-1 text-xs text-slate-600">4 ciclos de 25 capturas.</p>
+                <p className="text-sm font-black text-slate-900">50 fotos</p>
+                <p className="mt-1 text-xs text-slate-600">2 ciclos de 25 capturas.</p>
               </button>
             </div>
             {errorMessage ? (
@@ -711,6 +781,76 @@ export default function ConfigurationPanel({ role, permissions, onOpenUsers }: C
                 {errorMessage}
               </div>
             ) : null}
+          </article>
+        ) : null}
+
+        {canManageEmbeddings ? (
+          <article className="h-full rounded-2xl border border-slate-200 bg-slate-50 p-4 sm:p-5">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-[0.22em] text-orange-600">Reconhecimento</p>
+                <h3 className="mt-2 text-xl font-black text-slate-900">Regerar embeddings</h3>
+                <p className="mt-2 text-sm text-slate-600">
+                  Reprocessa as fotos ja cadastradas para melhorar a estabilidade do reconhecimento.
+                </p>
+              </div>
+              <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-orange-100 text-orange-600">
+                <RefreshCcw className="h-5 w-5" />
+              </div>
+            </div>
+
+            <div className="mt-4 rounded-xl border border-slate-200 bg-white px-3 py-3 text-sm text-slate-700">
+              {isLoadingEmbeddingsStatus && !embeddingsStatus ? (
+                <p>Carregando status...</p>
+              ) : embeddingsStatus ? (
+                <div className="space-y-1.5">
+                  <p>
+                    Status: <span className="font-semibold">{embeddingsStatus.running ? "Processando" : "Pronto"}</span>
+                  </p>
+                  <p>
+                    Alunos:{" "}
+                    <span className="font-semibold">
+                      {embeddingsStatus.processed_students}/{embeddingsStatus.total_students}
+                    </span>
+                  </p>
+                  <p>
+                    Amostras:{" "}
+                    <span className="font-semibold">
+                      {embeddingsStatus.processed_samples}/{embeddingsStatus.total_samples}
+                    </span>
+                  </p>
+                  <p>
+                    Falhas: <span className="font-semibold">{embeddingsStatus.failed_students}</span>
+                  </p>
+                </div>
+              ) : (
+                <p>Sem execucao registrada.</p>
+              )}
+            </div>
+
+            <div className="mt-4 flex flex-wrap items-center gap-3">
+              <button
+                type="button"
+                onClick={() => void handleStartEmbeddingsRebuild()}
+                disabled={isStartingEmbeddingsRebuild || embeddingsStatus?.running}
+                className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-xl bg-orange-500 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-orange-600 disabled:bg-slate-300 sm:w-auto"
+              >
+                <RefreshCcw className="h-4 w-4" />
+                {isStartingEmbeddingsRebuild
+                  ? "Iniciando..."
+                  : embeddingsStatus?.running
+                    ? "Regeracao em andamento"
+                    : "Regerar embeddings"}
+              </button>
+              <button
+                type="button"
+                onClick={() => void loadEmbeddingsStatus()}
+                disabled={isLoadingEmbeddingsStatus}
+                className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 transition hover:bg-slate-50 disabled:opacity-60 sm:w-auto"
+              >
+                Atualizar status
+              </button>
+            </div>
           </article>
         ) : null}
 
@@ -771,7 +911,11 @@ export default function ConfigurationPanel({ role, permissions, onOpenUsers }: C
           </article>
         ) : null}
 
-        {!canOpenUsers && !canEditCaptureMode && !canAccessMealSchedule && !canManagePermissions ? (
+        {!canOpenUsers &&
+        !canEditCaptureMode &&
+        !canAccessMealSchedule &&
+        !canManagePermissions &&
+        !canManageEmbeddings ? (
           <article className="h-full rounded-2xl border border-slate-200 bg-slate-50 p-4 sm:p-5">
             <h3 className="text-lg font-black text-slate-900">Sem configurações disponíveis</h3>
             <p className="mt-2 text-sm text-slate-600">

@@ -10,6 +10,7 @@ from app.adapters.persistence.sqlite_repositories import (
     SqliteAppSettingsRepository,
     SqliteClassRepository,
     SqliteFaceEmbeddingRepository,
+    SqliteFaceEmbeddingSampleRepository,
     SqliteStudentRepository,
     SqliteUserRepository,
     StaticRoleRepository,
@@ -20,6 +21,7 @@ from app.models.entities import SchoolYear
 from app.services.auth_service import AuthService
 from app.services.app_settings_service import AppSettingsService
 from app.services.class_service import ClassService
+from app.services.embeddings_rebuild_service import EmbeddingsRebuildService
 from app.services.meal_entry_service import MealEntryService
 from app.services.recognition_service import RecognitionService
 from app.services.stats_service import StatsService
@@ -55,9 +57,13 @@ class AppContainer:
         self.class_repository = SqliteClassRepository(sqlite_store)
         self.student_repository = SqliteStudentRepository(sqlite_store)
         self.face_embedding_repository = SqliteFaceEmbeddingRepository(sqlite_store)
+        self.face_embedding_sample_repository = SqliteFaceEmbeddingSampleRepository(sqlite_store)
         self.meal_entry_repository = JsonMealEntryRepository(meal_entries_store)
         self.recognition_attempt_repository = JsonRecognitionAttemptRepository(recognition_attempts_store)
-        self.face_engine = build_face_engine(self.settings.face_engine)
+        self.face_engine = build_face_engine(
+            self.settings.face_engine,
+            models_dir=self.settings.face_models_dir_path,
+        )
 
         self.user_service = UserService(self.user_repository, self.role_repository)
         self.app_settings_service = AppSettingsService(
@@ -79,6 +85,7 @@ class AppContainer:
             self.student_repository,
             self.class_repository,
             self.face_embedding_repository,
+            self.face_embedding_sample_repository,
             self.meal_entry_repository,
             self.recognition_attempt_repository,
             self.face_engine,
@@ -93,10 +100,17 @@ class AppContainer:
             self.student_repository,
             self.class_repository,
             self.face_embedding_repository,
+            self.face_embedding_sample_repository,
             self.recognition_attempt_repository,
             self.face_engine,
             self.app_settings_service,
             self.meal_entry_service,
+        )
+        self.embeddings_rebuild_service = EmbeddingsRebuildService(
+            self.settings,
+            self.app_settings_repository,
+            self.student_repository,
+            self.student_service,
         )
         self.stats_service = StatsService(
             self.settings,
@@ -115,3 +129,4 @@ class AppContainer:
             full_name=self.settings.bootstrap_director_full_name,
         )
         self.student_service.migrate_legacy_media_if_needed()
+        self.embeddings_rebuild_service.bootstrap_start_if_needed()

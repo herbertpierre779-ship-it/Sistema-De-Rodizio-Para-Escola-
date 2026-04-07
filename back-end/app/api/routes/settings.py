@@ -11,6 +11,7 @@ from app.api.dependencies import (
 from app.core.container import AppContainer
 from app.models.entities import UserRecord, UserRole
 from app.schemas.settings import (
+    EmbeddingsRebuildStatusResponse,
     MealScheduleSettingsResponse,
     MealScheduleSettingsUpdateRequest,
     PermissionsEffectiveResponse,
@@ -83,3 +84,19 @@ def set_permissions_settings(
 ) -> PermissionsSettingsResponse:
     container.app_settings_service.ensure_module_access(current_user, "config_permissoes")
     return container.app_settings_service.set_permissions_settings(payload)
+
+
+@router.get("/embeddings-rebuild", response_model=EmbeddingsRebuildStatusResponse)
+def get_embeddings_rebuild_status(
+    _: UserRecord = Depends(require_roles(UserRole.diretor)),
+    container: AppContainer = Depends(get_container),
+) -> EmbeddingsRebuildStatusResponse:
+    return container.embeddings_rebuild_service.get_status()
+
+
+@router.post("/embeddings-rebuild", response_model=EmbeddingsRebuildStatusResponse)
+def start_embeddings_rebuild(
+    _: UserRecord = Depends(require_roles(UserRole.diretor)),
+    container: AppContainer = Depends(get_container),
+) -> EmbeddingsRebuildStatusResponse:
+    return container.embeddings_rebuild_service.start_rebuild()

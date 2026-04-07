@@ -6,6 +6,7 @@
 /ligar-celular-adb-reverse.bat
 /sons/
 /lixinhos do pierre/
+/NAOGAZEI/
 
 # frontend
 node_modules/
@@ -25,6 +26,10 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.coverage
+.coverage.*
+coverage/
+htmlcov/
 
 # Local envs
 .env
@@ -43,10 +48,22 @@ Thumbs.db
 # Runtime data/ local backups
 back-end/data/*.db
 back-end/data/*.db-*
+back-end/data/*.sqlite
+back-end/data/*.sqlite3
 back-end/data/meal_entries.json
 back-end/data/recognition_attempts.json
 back-end/data/dev_store.json
 back-end/data/id_reset_backup_*/
+
+# Temp files
+*.tmp
+*.bak
+*.log
+
+# Modelos locais pesados (baixados em ambiente local)
+back-end/models/*.onnx
+back-end/models/*.ort
+back-end/models/*.engine
 
 # fotinhas 
 /fotos/

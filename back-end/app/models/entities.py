@@ -75,6 +75,17 @@ class FaceEmbeddingRecord(BaseModel):
     updated_at: datetime
 
 
+class FaceEmbeddingSampleRecord(BaseModel):
+    id: str = ""
+    student_id: str
+    engine: str
+    vector: list[float] = Field(default_factory=list)
+    source_image_path: str
+    quality_score: float = 0.0
+    created_at: datetime
+    updated_at: datetime
+
+
 class RecognitionAttemptRecord(BaseModel):
     id: str = ""
     status: RecognitionStatus

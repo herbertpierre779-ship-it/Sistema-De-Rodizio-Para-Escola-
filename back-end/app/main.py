@@ -31,6 +31,15 @@ def create_app() -> FastAPI:
     app.mount("/media", StaticFiles(directory=str(settings.photos_root_path)), name="media")
     app.include_router(api_router)
 
+    @app.middleware("http")
+    async def media_no_cache_middleware(request: Request, call_next):
+        response = await call_next(request)
+        if request.url.path.startswith("/media/"):
+            response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+            response.headers["Pragma"] = "no-cache"
+            response.headers["Expires"] = "0"
+        return response
+
     @app.exception_handler(AppError)
     async def app_error_handler(_: Request, exc: AppError) -> JSONResponse:
         return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})

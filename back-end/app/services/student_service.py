@@ -13,12 +13,20 @@ from app.core.config import Settings
 from app.core.cpf import is_valid_cpf, normalize_cpf
 from app.core.exceptions import AppError
 from app.core.media import build_media_url, build_photo_relative_path, build_student_media_directory, slugify_segment
-from app.models.entities import ClassRecord, FaceEmbeddingRecord, MealType, RecognitionStatus, StudentRecord
+from app.models.entities import (
+    ClassRecord,
+    FaceEmbeddingRecord,
+    FaceEmbeddingSampleRecord,
+    MealType,
+    RecognitionStatus,
+    StudentRecord,
+)
 from app.schemas.settings import RegistrationCaptureMode
 from app.repositories.contracts import (
     AppSettingsRepository,
     ClassRepository,
     FaceEmbeddingRepository,
+    FaceEmbeddingSampleRepository,
     MealEntryFilters,
     MealEntryRepository,
     RecognitionAttemptRepository,
@@ -39,6 +47,9 @@ from app.services.meal_entry_service import MealEntryService
 
 CaptureKind = Literal["front", "right", "left", "sample", "unknown"]
 LEGACY_MEDIA_MIGRATION_KEY = "legacy_media_migration_v1_done"
+ADVANCED_CAPTURE_TOTAL = 50
+DEFAULT_STABLE_SAMPLE_LIMIT = 20
+DEFAULT_MIN_SAMPLE_QUALITY = 0.35
 
 
 class ReenrollFilePayload(TypedDict):
@@ -49,8 +60,10 @@ class ReenrollFilePayload(TypedDict):
 
 class ReenrollVectorPayload(TypedDict):
     image_bytes: bytes
+    storage_image_bytes: bytes
     engine: str
     vector: list[float]
+    quality_score: float
 
 
 class StudentService:
@@ -61,6 +74,7 @@ class StudentService:
         student_repository: StudentRepository,
         class_repository: ClassRepository,
         face_embedding_repository: FaceEmbeddingRepository,
+        face_embedding_sample_repository: FaceEmbeddingSampleRepository,
         meal_entry_repository: MealEntryRepository,
         recognition_attempt_repository: RecognitionAttemptRepository,
         face_engine: BaseFaceEngine,
@@ -70,6 +84,7 @@ class StudentService:
         self.student_repository = student_repository
         self.class_repository = class_repository
         self.face_embedding_repository = face_embedding_repository
+        self.face_embedding_sample_repository = face_embedding_sample_repository
         self.meal_entry_repository = meal_entry_repository
         self.recognition_attempt_repository = recognition_attempt_repository
         self.face_engine = face_engine
@@ -107,7 +122,7 @@ class StudentService:
         embedding = self.face_embedding_repository.get_by_student_id(student.id)
         sample_assets = self._list_cycle_sample_assets(class_record, student)
         samples_count = embedding.samples_count if embedding else len(sample_assets)
-        mode_hint: RegistrationCaptureMode = "hundred_photos" if samples_count >= 100 else "three_photos"
+        mode_hint: RegistrationCaptureMode = "hundred_photos" if samples_count >= ADVANCED_CAPTURE_TOTAL else "three_photos"
 
         return StudentFaceAssetsResponse(
             student_id=student.id,
@@ -123,6 +138,81 @@ class StudentService:
             sample_urls=sample_assets,
         )
 
+    def rebuild_face_embeddings_for_student(self, student_id: str) -> tuple[int, int]:
+        student = self.get_student_record(student_id)
+        class_record = self._ensure_class_exists(student.class_id)
+        student = self._ensure_student_media_folder(student, class_record)
+        source_paths = self._list_student_sample_relative_paths(class_record, student)
+        if not source_paths:
+            return 0, 0
+
+        now = datetime.now(UTC)
+        sample_records: list[FaceEmbeddingSampleRecord] = []
+        for relative_path in source_paths:
+            absolute_path = self.settings.photos_root_path / relative_path
+            if not absolute_path.exists() or not absolute_path.is_file():
+                continue
+            try:
+                image_bytes = absolute_path.read_bytes()
+            except OSError:
+                continue
+            extraction = self.face_engine.extract_embedding(image_bytes)
+            if extraction.status != RecognitionStatus.success or not extraction.vector:
+                continue
+            cropped_image_bytes = extraction.cropped_image_bytes
+            if cropped_image_bytes:
+                try:
+                    absolute_path.parent.mkdir(parents=True, exist_ok=True)
+                    absolute_path.write_bytes(cropped_image_bytes)
+                except OSError:
+                    # Se falhar escrita do recorte, seguimos com a amostra atual para nao interromper o rebuild.
+                    pass
+            sample_records.append(
+                FaceEmbeddingSampleRecord(
+                    student_id=student_id,
+                    engine=extraction.engine,
+                    vector=extraction.vector,
+                    source_image_path=relative_path,
+                    quality_score=self._normalize_quality_score(extraction.quality_score),
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+
+        if not sample_records:
+            raise RuntimeError("Nenhuma amostra valida foi gerada durante o rebuild.")
+
+        sample_source_paths = [sample.source_image_path for sample in sample_records if sample.source_image_path]
+        primary_source_path = sample_source_paths[0] if sample_source_paths else None
+        student_updates: dict[str, object] = {"updated_at": now}
+        if primary_source_path and (not student.photo_path or student.photo_path not in sample_source_paths):
+            student_updates["photo_path"] = primary_source_path
+        student = self.student_repository.update(student.model_copy(update=student_updates))
+
+        self.face_embedding_sample_repository.replace_for_student(student_id, sample_records)
+        stable_vectors = self._select_stable_vectors(sample_records)
+        averaged_vector = self._average_vectors(stable_vectors)
+        existing_embedding = self.face_embedding_repository.get_by_student_id(student_id)
+        self.face_embedding_repository.upsert(
+            FaceEmbeddingRecord(
+                id=existing_embedding.id if existing_embedding else "",
+                student_id=student_id,
+                engine=sample_records[-1].engine,
+                vector=averaged_vector,
+                samples_count=len(sample_records),
+                source_image_path=sample_records[-1].source_image_path,
+                created_at=existing_embedding.created_at if existing_embedding else now,
+                updated_at=now,
+            )
+        )
+        return len(sample_records), len(stable_vectors)
+
+    def estimate_face_sample_count(self, student_id: str) -> int:
+        student = self.get_student_record(student_id)
+        class_record = self._ensure_class_exists(student.class_id)
+        student = self._ensure_student_media_folder(student, class_record)
+        return len(self._list_student_sample_relative_paths(class_record, student))
+
     def reenroll_face_batch(
         self,
         *,
@@ -133,7 +223,7 @@ class StudentService:
         student = self.get_student_record(student_id)
         class_record = self._ensure_class_exists(student.class_id)
         student = self._ensure_student_media_folder(student, class_record)
-        expected_count = 100 if mode == "hundred_photos" else 3
+        expected_count = ADVANCED_CAPTURE_TOTAL if mode == "hundred_photos" else 3
         received_count = len(files)
         if received_count != expected_count:
             raise AppError(
@@ -145,18 +235,17 @@ class StudentService:
         now = datetime.now(UTC)
 
         self.face_embedding_repository.delete_by_student_id(student_id)
+        self.face_embedding_sample_repository.delete_by_student_id(student_id)
         self._delete_student_media_directory(student)
         self._delete_photo(student.photo_path)
         self._delete_photo(student.photo_right_path)
         self._delete_photo(student.photo_left_path)
 
         saved_paths: list[str] = []
-        vectors: list[list[float]] = []
         for index, payload in enumerate(extracted):
             filename = self._resolve_reenroll_filename(mode=mode, index=index)
-            saved_path = self._save_named_photo(student, class_record, payload["image_bytes"], filename)
+            saved_path = self._save_named_photo(student, class_record, payload["storage_image_bytes"], filename)
             saved_paths.append(saved_path)
-            vectors.append(payload["vector"])
 
         if not saved_paths:
             raise AppError(400, "Nenhuma foto valida foi enviada para recaptura.")
@@ -169,12 +258,27 @@ class StudentService:
         }
         updated_student = self.student_repository.update(student.model_copy(update=student_updates))
 
-        averaged_vector = self._average_vectors(vectors)
+        sample_records = [
+            FaceEmbeddingSampleRecord(
+                student_id=student_id,
+                engine=payload["engine"],
+                vector=payload["vector"],
+                source_image_path=saved_paths[index],
+                quality_score=payload["quality_score"],
+                created_at=now,
+                updated_at=now,
+            )
+            for index, payload in enumerate(extracted)
+        ]
+        self.face_embedding_sample_repository.replace_for_student(student_id, sample_records)
+
+        stable_vectors = self._select_stable_vectors(sample_records)
+        averaged_vector = self._average_vectors(stable_vectors)
         embedding = FaceEmbeddingRecord(
             student_id=student_id,
             engine=extracted[-1]["engine"],
             vector=averaged_vector,
-            samples_count=expected_count,
+            samples_count=len(sample_records),
             source_image_path=saved_paths[-1],
             created_at=now,
             updated_at=now,
@@ -298,6 +402,7 @@ class StudentService:
     def delete_student(self, student_id: str) -> None:
         student = self.get_student_record(student_id)
         self.face_embedding_repository.delete_by_student_id(student_id)
+        self.face_embedding_sample_repository.delete_by_student_id(student_id)
         self.meal_entry_repository.delete_by_student_id(student_id)
         self._delete_student_media_directory(student)
         self._delete_photo(student.photo_path)
@@ -327,39 +432,44 @@ class StudentService:
         existing_embedding = self.face_embedding_repository.get_by_student_id(student_id)
         capture_kind, sample_cycle, sample_index = self._resolve_capture_kind(filename)
         student_updates: dict[str, object] = {}
-
+        storage_image_bytes = extraction.cropped_image_bytes or image_bytes
         source_image_path: str | None = student.photo_path
 
         if capture_kind == "front":
-            front_path = self._save_named_photo(student, class_record, image_bytes, "front.jpg")
+            front_path = self._save_named_photo(student, class_record, storage_image_bytes, "front.jpg")
             student_updates["photo_path"] = front_path
             source_image_path = front_path
         elif capture_kind == "right":
-            right_path = self._save_named_photo(student, class_record, image_bytes, "right.jpg")
+            right_path = self._save_named_photo(student, class_record, storage_image_bytes, "right.jpg")
             student_updates["photo_right_path"] = right_path
             source_image_path = right_path
             if not student.photo_path:
                 student_updates["photo_path"] = right_path
         elif capture_kind == "left":
-            left_path = self._save_named_photo(student, class_record, image_bytes, "left.jpg")
+            left_path = self._save_named_photo(student, class_record, storage_image_bytes, "left.jpg")
             student_updates["photo_left_path"] = left_path
             source_image_path = left_path
             if not student.photo_path:
                 student_updates["photo_path"] = left_path
         elif capture_kind == "sample" and sample_cycle is not None and sample_index is not None:
             sample_filename = f"cycle-{sample_cycle:02d}-{sample_index:03d}.jpg"
-            sample_path = self._save_named_photo(student, class_record, image_bytes, sample_filename)
+            sample_path = self._save_named_photo(student, class_record, storage_image_bytes, sample_filename)
             source_image_path = sample_path
             if not student.photo_path:
                 student_updates["photo_path"] = sample_path
         else:
             if not student.photo_path:
-                fallback_path = self._save_named_photo(student, class_record, image_bytes, "front.jpg")
+                fallback_path = self._save_named_photo(student, class_record, storage_image_bytes, "front.jpg")
                 student_updates["photo_path"] = fallback_path
                 source_image_path = fallback_path
             else:
                 timestamp_filename = f"sample-{int(time.time() * 1000)}.jpg"
-                source_image_path = self._save_named_photo(student, class_record, image_bytes, timestamp_filename)
+                source_image_path = self._save_named_photo(
+                    student,
+                    class_record,
+                    storage_image_bytes,
+                    timestamp_filename,
+                )
 
         if student_updates:
             student_updates["updated_at"] = now
@@ -368,19 +478,24 @@ class StudentService:
             updated_student = student
 
         source_image_path = source_image_path or updated_student.photo_path
+        if not source_image_path:
+            raise AppError(400, "Nao foi possivel determinar o caminho da amostra capturada.")
 
-        averaged_vector = extraction.vector
-        next_samples_count = 1
-        if existing_embedding and existing_embedding.vector and len(existing_embedding.vector) == len(extraction.vector):
-            previous_samples = max(existing_embedding.samples_count, 1)
-            total_samples = previous_samples + 1
-            averaged_vector = [
-                ((existing_embedding.vector[index] * previous_samples) + extraction.vector[index]) / total_samples
-                for index in range(len(extraction.vector))
-            ]
-            next_samples_count = total_samples
-        elif existing_embedding:
-            next_samples_count = max(existing_embedding.samples_count, 1) + 1
+        sample_record = FaceEmbeddingSampleRecord(
+            student_id=student_id,
+            engine=extraction.engine,
+            vector=extraction.vector,
+            source_image_path=source_image_path,
+            quality_score=self._normalize_quality_score(extraction.quality_score),
+            created_at=now,
+            updated_at=now,
+        )
+        self.face_embedding_sample_repository.upsert(sample_record)
+
+        all_samples = self.face_embedding_sample_repository.list_by_student_id(student_id)
+        stable_vectors = self._select_stable_vectors(all_samples)
+        averaged_vector = self._average_vectors(stable_vectors)
+        next_samples_count = len(all_samples)
 
         embedding = FaceEmbeddingRecord(
             id=existing_embedding.id if existing_embedding else "",
@@ -526,6 +641,32 @@ class StudentService:
             assets.append(StudentFaceAssetItem(filename=filename, url=url))
         return assets
 
+    def _list_student_sample_relative_paths(
+        self,
+        class_record: ClassRecord,
+        student: StudentRecord,
+    ) -> list[str]:
+        cycle_assets = self._list_cycle_sample_assets(class_record, student)
+        if cycle_assets:
+            media_dir_relative = build_student_media_directory(class_record, student.media_folder or "")
+            paths = [
+                (Path(media_dir_relative) / item.filename).as_posix()
+                for item in cycle_assets
+            ]
+            return [path for path in paths if path.strip()]
+
+        ordered_paths: list[str] = []
+        seen: set[str] = set()
+        for value in (student.photo_path, student.photo_right_path, student.photo_left_path):
+            if not value:
+                continue
+            normalized = value.strip()
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            ordered_paths.append(normalized)
+        return ordered_paths
+
     def _extract_reenroll_vectors(
         self,
         *,
@@ -554,8 +695,10 @@ class StudentService:
             extracted.append(
                 ReenrollVectorPayload(
                     image_bytes=payload["image_bytes"],
+                    storage_image_bytes=extraction.cropped_image_bytes or payload["image_bytes"],
                     engine=extraction.engine,
                     vector=extraction.vector,
+                    quality_score=self._normalize_quality_score(extraction.quality_score),
                 )
             )
         return extracted
@@ -584,6 +727,46 @@ class StudentService:
                 totals[index] += value
         count = float(len(vectors))
         return [value / count for value in totals]
+
+    @staticmethod
+    def _normalize_quality_score(raw_value: float | None) -> float:
+        if raw_value is None:
+            return 0.5
+        return max(0.0, min(1.0, float(raw_value)))
+
+    def _select_stable_vectors(self, samples: list[FaceEmbeddingSampleRecord]) -> list[list[float]]:
+        if not samples:
+            return []
+
+        min_quality = self._min_sample_quality()
+        filtered = [
+            sample
+            for sample in samples
+            if sample.vector and sample.quality_score >= min_quality
+        ]
+        source = filtered if filtered else [sample for sample in samples if sample.vector]
+        if not source:
+            return []
+
+        ranked = sorted(
+            source,
+            key=lambda sample: (sample.quality_score, sample.updated_at.timestamp()),
+            reverse=True,
+        )
+        selected = ranked[: self._stable_sample_limit()]
+        return [sample.vector for sample in selected]
+
+    def _stable_sample_limit(self) -> int:
+        profile = str(self.settings.recognition_profile).strip().casefold()
+        if profile in {"naogazei_like", "naogazei", "aggressive"}:
+            return max(20, int(self.settings.recognition_naogazei_stable_sample_limit))
+        return DEFAULT_STABLE_SAMPLE_LIMIT
+
+    def _min_sample_quality(self) -> float:
+        profile = str(self.settings.recognition_profile).strip().casefold()
+        if profile in {"naogazei_like", "naogazei", "aggressive"}:
+            return max(0.0, min(1.0, float(self.settings.recognition_naogazei_min_quality_score)))
+        return DEFAULT_MIN_SAMPLE_QUALITY
 
     @staticmethod
     def _reenroll_position_label(mode: RegistrationCaptureMode, index: int) -> str:
@@ -669,17 +852,19 @@ class StudentService:
 
     def _delete_student_media_directory(self, student: StudentRecord) -> None:
         class_record = self.class_repository.get_by_id(student.class_id)
-        relative_dir = None
+        candidate_dirs: set[str] = set()
         if class_record and student.media_folder:
-            relative_dir = build_student_media_directory(class_record, student.media_folder)
-        if not relative_dir:
-            relative_dir = self._resolve_student_media_dir_from_paths(student)
-        if not relative_dir:
+            candidate_dirs.add(build_student_media_directory(class_record, student.media_folder))
+        resolved_dir = self._resolve_student_media_dir_from_paths(student)
+        if resolved_dir:
+            candidate_dirs.add(resolved_dir)
+        if not candidate_dirs:
             return
 
-        absolute_dir = self.settings.photos_root_path / relative_dir
-        if absolute_dir.exists() and absolute_dir.is_dir():
-            shutil.rmtree(absolute_dir, ignore_errors=True)
+        for relative_dir in candidate_dirs:
+            absolute_dir = self.settings.photos_root_path / relative_dir
+            if absolute_dir.exists() and absolute_dir.is_dir():
+                shutil.rmtree(absolute_dir, ignore_errors=True)
 
     def _relocate_student_media(
         self,
@@ -728,6 +913,22 @@ class StudentService:
                     }
                 )
             )
+        if previous_dir and target_dir:
+            sample_records = self.face_embedding_sample_repository.list_by_student_id(updated_student.id)
+            for sample in sample_records:
+                if not sample.source_image_path.startswith(f"{previous_dir}/"):
+                    continue
+                next_source = f"{target_dir}/{sample.source_image_path.removeprefix(f'{previous_dir}/')}"
+                if next_source == sample.source_image_path:
+                    continue
+                self.face_embedding_sample_repository.upsert(
+                    sample.model_copy(
+                        update={
+                            "source_image_path": next_source,
+                            "updated_at": datetime.now(UTC),
+                        }
+                    )
+                )
         return persisted
 
     def _rebase_student_paths(self, student: StudentRecord, target_dir: str | None) -> dict[str, str | None]:

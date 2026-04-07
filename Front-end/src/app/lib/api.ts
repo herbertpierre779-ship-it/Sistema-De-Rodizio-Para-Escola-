@@ -1,6 +1,7 @@
 import type {
   AuthUser,
   ClassItem,
+  EmbeddingsRebuildStatus,
   FaceEnrollResponse,
   LoginResponse,
   MealEntry,
@@ -244,5 +245,12 @@ export const settingsApi = {
       method: "PUT",
       token,
       body: payload,
+    }),
+  getEmbeddingsRebuildStatus: (token: string) =>
+    apiRequest<EmbeddingsRebuildStatus>("/settings/embeddings-rebuild", { token }),
+  startEmbeddingsRebuild: (token: string) =>
+    apiRequest<EmbeddingsRebuildStatus>("/settings/embeddings-rebuild", {
+      method: "POST",
+      token,
     }),
 };

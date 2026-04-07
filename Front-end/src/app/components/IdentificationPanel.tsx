@@ -39,6 +39,7 @@ const mealOptions: Array<{
 type OperationStep = "choose_meal" | "camera" | "result";
 type CaptureMode = "manual" | "auto" | "hybrid";
 type ToastTone = "success" | "warning" | "error";
+type LunchExceptionStep = "choice" | "cpf" | "camera" | "confirm";
 
 type ToastState = {
   id: number;
@@ -93,6 +94,10 @@ export default function IdentificationPanel() {
     }
     return "manual";
   });
+  const [operationFacingMode, setOperationFacingMode] = useState<"environment" | "user">(() => {
+    const stored = window.localStorage.getItem("cantina-operation-facing-mode");
+    return stored === "user" || stored === "environment" ? stored : "environment";
+  });
   const [operatorOverrideAccepted, setOperatorOverrideAccepted] = useState(false);
   const [compactReview, setCompactReview] = useState<CompactReviewState>(null);
   const [compactReviewError, setCompactReviewError] = useState("");
@@ -105,6 +110,13 @@ export default function IdentificationPanel() {
   const [mealSchedule, setMealSchedule] = useState<MealScheduleSettings>(DEFAULT_MEAL_SCHEDULE);
   const [isLoadingMealSchedule, setIsLoadingMealSchedule] = useState(true);
   const [scheduleTick, setScheduleTick] = useState(() => Date.now());
+  const [isLunchExceptionOpen, setIsLunchExceptionOpen] = useState(false);
+  const [lunchExceptionStep, setLunchExceptionStep] = useState<LunchExceptionStep>("choice");
+  const [lunchExceptionCpf, setLunchExceptionCpf] = useState("");
+  const [lunchExceptionError, setLunchExceptionError] = useState("");
+  const [isLunchExceptionBusy, setIsLunchExceptionBusy] = useState(false);
+  const [lunchExceptionResult, setLunchExceptionResult] = useState<RecognitionResult | null>(null);
+  const [lunchExceptionConfirmed, setLunchExceptionConfirmed] = useState(false);
 
   useEffect(() => {
     if (!toast?.id) {
@@ -123,6 +135,10 @@ export default function IdentificationPanel() {
   useEffect(() => {
     window.localStorage.setItem("cantina-capture-mode", captureMode);
   }, [captureMode]);
+
+  useEffect(() => {
+    window.localStorage.setItem("cantina-operation-facing-mode", operationFacingMode);
+  }, [operationFacingMode]);
 
   useEffect(() => {
     if (!token || step !== "choose_meal") return;
@@ -182,6 +198,20 @@ export default function IdentificationPanel() {
     });
   };
 
+  const resetLunchExceptionState = () => {
+    setLunchExceptionStep("choice");
+    setLunchExceptionCpf("");
+    setLunchExceptionError("");
+    setIsLunchExceptionBusy(false);
+    setLunchExceptionResult(null);
+    setLunchExceptionConfirmed(false);
+  };
+
+  const closeLunchExceptionModal = () => {
+    setIsLunchExceptionOpen(false);
+    resetLunchExceptionState();
+  };
+
   const resetToMealSelection = () => {
     setIsLoadingMealSchedule(true);
     setStep("choose_meal");
@@ -200,6 +230,8 @@ export default function IdentificationPanel() {
     setCpfModalError("");
     setIsCpfValidating(false);
     setIsCpfValidatedResult(false);
+    setIsLunchExceptionOpen(false);
+    resetLunchExceptionState();
   };
 
   const prepareNextCapture = () => {
@@ -218,6 +250,8 @@ export default function IdentificationPanel() {
     setCpfModalError("");
     setIsCpfValidating(false);
     setIsCpfValidatedResult(false);
+    setIsLunchExceptionOpen(false);
+    resetLunchExceptionState();
   };
 
   const restartCamera = () => {
@@ -234,6 +268,8 @@ export default function IdentificationPanel() {
     setCpfModalError("");
     setIsCpfValidating(false);
     setIsCpfValidatedResult(false);
+    setIsLunchExceptionOpen(false);
+    resetLunchExceptionState();
   };
 
   const handleMealSelection = (mealType: MealType) => {
@@ -252,6 +288,187 @@ export default function IdentificationPanel() {
     setCpfModalError("");
     setIsCpfValidating(false);
     setIsCpfValidatedResult(false);
+    setIsLunchExceptionOpen(false);
+    resetLunchExceptionState();
+  };
+
+  const handleOpenLunchException = () => {
+    if (selectedMealType !== "almoco") {
+      return;
+    }
+    resetLunchExceptionState();
+    setIsLunchExceptionOpen(true);
+  };
+
+  const handleLunchExceptionBack = () => {
+    if (isLunchExceptionBusy) {
+      return;
+    }
+    if (lunchExceptionStep === "choice") {
+      closeLunchExceptionModal();
+      return;
+    }
+    setLunchExceptionStep("choice");
+    setLunchExceptionError("");
+    setLunchExceptionResult(null);
+    setLunchExceptionConfirmed(false);
+  };
+
+  const handleLunchExceptionCpfSubmit = async () => {
+    if (!token || selectedMealType !== "almoco") {
+      return;
+    }
+
+    const normalizedCpf = normalizeCpf(lunchExceptionCpf);
+    if (!isValidCpf(normalizedCpf)) {
+      setLunchExceptionError("Informe um CPF valido para continuar.");
+      return;
+    }
+
+    setLunchExceptionError("");
+    setIsLunchExceptionBusy(true);
+
+    try {
+      const response = await recognitionApi.identifyByCpf(token, {
+        cpf: normalizedCpf,
+        meal_type: "almoco",
+      });
+
+      if (response.already_recorded_today) {
+        showToast(
+          "warning",
+          "Refeicao ja registrada",
+          response.already_recorded_message ?? "Esse aluno ja recebeu essa refeicao hoje.",
+          {
+            eventId: "recognition.duplicate",
+            payload: {
+              studentName: response.student?.full_name,
+              mealType: "almoco",
+              dedupeKey: `exception-duplicate-cpf-${response.student?.id ?? "unknown"}`,
+            },
+          },
+        );
+        closeLunchExceptionModal();
+        prepareNextCapture();
+        return;
+      }
+
+      if (!response.student || response.status === "not_found") {
+        setLunchExceptionError(response.message);
+        return;
+      }
+
+      setLunchExceptionResult(response);
+      setLunchExceptionConfirmed(false);
+      setLunchExceptionError("");
+      setLunchExceptionStep("confirm");
+    } catch (error) {
+      setLunchExceptionError(
+        error instanceof ApiError ? error.message : "Nao foi possivel validar o CPF agora.",
+      );
+    } finally {
+      setIsLunchExceptionBusy(false);
+    }
+  };
+
+  const handleLunchExceptionCameraCapture = async (file: File) => {
+    if (!token || selectedMealType !== "almoco") {
+      return;
+    }
+
+    setLunchExceptionError("");
+    setIsLunchExceptionBusy(true);
+
+    try {
+      const response = await recognitionApi.identify(token, file, "almoco");
+
+      if (response.already_recorded_today) {
+        showToast(
+          "warning",
+          "Refeicao ja registrada",
+          response.already_recorded_message ?? "Esse aluno ja recebeu essa refeicao hoje.",
+          {
+            eventId: "recognition.duplicate",
+            payload: {
+              studentName: response.student?.full_name,
+              mealType: "almoco",
+              dedupeKey: `exception-duplicate-camera-${response.student?.id ?? "unknown"}`,
+            },
+          },
+        );
+        closeLunchExceptionModal();
+        prepareNextCapture();
+        return;
+      }
+
+      const hasCandidateStudent =
+        Boolean(response.student) && (response.status === "success" || response.status === "low_confidence");
+      if (hasCandidateStudent) {
+        setLunchExceptionResult(response);
+        setLunchExceptionConfirmed(false);
+        setLunchExceptionError("");
+        setLunchExceptionStep("confirm");
+        return;
+      }
+
+      if (
+        response.status === "not_found" ||
+        response.status === "no_face_detected" ||
+        response.status === "multiple_faces_detected"
+      ) {
+        setLunchExceptionError(response.message);
+        return;
+      }
+
+      setLunchExceptionError("Nao foi possivel identificar um aluno valido nesta captura.");
+    } catch (error) {
+      setLunchExceptionError(
+        error instanceof ApiError ? error.message : "Nao foi possivel validar a camera agora.",
+      );
+    } finally {
+      setIsLunchExceptionBusy(false);
+    }
+  };
+
+  const handleLunchExceptionConfirm = async () => {
+    if (!token || selectedMealType !== "almoco" || !lunchExceptionResult?.student || !lunchExceptionConfirmed) {
+      return;
+    }
+
+    setLunchExceptionError("");
+    setIsLunchExceptionBusy(true);
+
+    try {
+      await mealEntriesApi.create(token, {
+        student_id: lunchExceptionResult.student.id,
+        meal_type: "almoco",
+        source: "excecao",
+        confidence: lunchExceptionResult.confidence,
+      });
+
+      showToast("success", "Excecao confirmada", "Entrada registrada com sucesso no almoco.");
+      closeLunchExceptionModal();
+      prepareNextCapture();
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 409) {
+        showToast("warning", "Refeicao ja registrada", error.message, {
+          eventId: "recognition.duplicate",
+          payload: {
+            studentName: lunchExceptionResult.student.full_name,
+            mealType: "almoco",
+            dedupeKey: `exception-confirm-duplicate-${lunchExceptionResult.student.id}`,
+          },
+        });
+        closeLunchExceptionModal();
+        prepareNextCapture();
+      } else {
+        setLunchExceptionError(
+          error instanceof ApiError ? error.message : "Nao foi possivel confirmar a excecao.",
+        );
+      }
+    } finally {
+      setIsLunchExceptionBusy(false);
+    }
   };
 
   const toastToneForRecognition = (recognitionResult: RecognitionResult): ToastTone => {
@@ -707,6 +924,37 @@ export default function IdentificationPanel() {
           onConfirm={() => void handleValidateByCpf()}
         />
       )}
+      {isLunchExceptionOpen && selectedMealType === "almoco" && (
+        <LunchExceptionModal
+          step={lunchExceptionStep}
+          cpfValue={lunchExceptionCpf}
+          errorMessage={lunchExceptionError}
+          isBusy={isLunchExceptionBusy}
+          result={lunchExceptionResult}
+          isConfirmed={lunchExceptionConfirmed}
+          onBack={handleLunchExceptionBack}
+          onClose={closeLunchExceptionModal}
+          onSelectCpf={() => {
+            setLunchExceptionStep("cpf");
+            setLunchExceptionError("");
+          }}
+          onSelectCamera={() => {
+            setLunchExceptionStep("camera");
+            setLunchExceptionError("");
+          }}
+          onCpfChange={(value) => {
+            setLunchExceptionCpf(formatCpf(value));
+            setLunchExceptionError("");
+          }}
+          onCpfConfirm={() => void handleLunchExceptionCpfSubmit()}
+          onCameraCapture={handleLunchExceptionCameraCapture}
+          onRetryCamera={() => setLunchExceptionError("")}
+          cameraFacingMode={operationFacingMode}
+          onCameraFacingModeChange={setOperationFacingMode}
+          onConfirmCheckChange={setLunchExceptionConfirmed}
+          onConfirm={() => void handleLunchExceptionConfirm()}
+        />
+      )}
 
       {step === "choose_meal" && (
         <>
@@ -793,6 +1041,17 @@ export default function IdentificationPanel() {
               />
               Abrir câmera automaticamente na próxima leitura
             </label>
+            {selectedMealType === "almoco" ? (
+              <div className="mt-4 flex justify-end">
+                <button
+                  type="button"
+                  onClick={handleOpenLunchException}
+                  className="inline-flex items-center gap-2 rounded-2xl border border-orange-200 bg-orange-50 px-5 py-3 text-sm font-semibold text-orange-700 transition hover:bg-orange-100"
+                >
+                  Excecao
+                </button>
+              </div>
+            ) : null}
           </div>
 
           {!isCameraEnabled ? (
@@ -833,6 +1092,8 @@ export default function IdentificationPanel() {
               isBusy={isIdentifying}
               onCapture={handleCapturedFrame}
               onCancel={() => setIsCameraEnabled(false)}
+              initialFacingMode={operationFacingMode}
+              onFacingModeChange={setOperationFacingMode}
             />
           )}
         </div>
@@ -1164,6 +1425,232 @@ function CpfValidationModal({
             {isSubmitting ? "Validando..." : "Validar CPF"}
           </button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+function LunchExceptionModal({
+  step,
+  cpfValue,
+  errorMessage,
+  isBusy,
+  result,
+  isConfirmed,
+  onBack,
+  onClose,
+  onSelectCpf,
+  onSelectCamera,
+  onCpfChange,
+  onCpfConfirm,
+  onCameraCapture,
+  onRetryCamera,
+  cameraFacingMode,
+  onCameraFacingModeChange,
+  onConfirmCheckChange,
+  onConfirm,
+}: {
+  step: LunchExceptionStep;
+  cpfValue: string;
+  errorMessage: string;
+  isBusy: boolean;
+  result: RecognitionResult | null;
+  isConfirmed: boolean;
+  onBack: () => void;
+  onClose: () => void;
+  onSelectCpf: () => void;
+  onSelectCamera: () => void;
+  onCpfChange: (value: string) => void;
+  onCpfConfirm: () => void;
+  onCameraCapture: (file: File) => void | Promise<void>;
+  onRetryCamera: () => void;
+  cameraFacingMode: "environment" | "user";
+  onCameraFacingModeChange: (next: "environment" | "user") => void;
+  onConfirmCheckChange: (checked: boolean) => void;
+  onConfirm: () => void;
+}) {
+  const cpfReady = normalizeCpf(cpfValue).length === 11;
+  const canConfirm = Boolean(result?.student) && isConfirmed && !isBusy;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-end justify-center bg-slate-950/55 px-3 py-4 backdrop-blur-sm sm:items-center sm:px-4">
+      <div className="max-h-[92vh] w-full max-w-2xl overflow-y-auto rounded-[2rem] border border-white/70 bg-white p-6 shadow-2xl shadow-slate-900/25 sm:p-7">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <p className="text-sm font-semibold uppercase tracking-[0.25em] text-orange-600">Excecao no almoco</p>
+          <div className="flex items-center gap-2">
+            {step !== "choice" ? (
+              <button
+                type="button"
+                onClick={onBack}
+                disabled={isBusy}
+                className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-slate-100 px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-200 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                <ArrowLeft className="h-4 w-4" />
+                Voltar
+              </button>
+            ) : null}
+            <button
+              type="button"
+              onClick={onClose}
+              disabled={isBusy}
+              className="inline-flex items-center rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              Cancelar
+            </button>
+          </div>
+        </div>
+
+        {step === "choice" ? (
+          <div className="mt-5 grid gap-3 sm:grid-cols-2">
+            <button
+              type="button"
+              onClick={onSelectCpf}
+              className="rounded-2xl border border-slate-200 bg-white p-5 text-left transition hover:border-orange-300 hover:bg-orange-50"
+            >
+              <p className="text-base font-black text-slate-900">CPF</p>
+              <p className="mt-2 text-sm text-slate-600">Validar aluno informando o CPF manualmente.</p>
+            </button>
+            <button
+              type="button"
+              onClick={onSelectCamera}
+              className="rounded-2xl border border-slate-200 bg-white p-5 text-left transition hover:border-orange-300 hover:bg-orange-50"
+            >
+              <p className="text-base font-black text-slate-900">Camera</p>
+              <p className="mt-2 text-sm text-slate-600">Validar aluno por reconhecimento facial na hora.</p>
+            </button>
+          </div>
+        ) : null}
+
+        {step === "cpf" ? (
+          <div className="mt-5">
+            <label htmlFor="lunchExceptionCpf" className="mb-2 block text-sm font-semibold text-slate-700">
+              CPF do aluno
+            </label>
+            <input
+              id="lunchExceptionCpf"
+              type="text"
+              value={cpfValue}
+              onChange={(event) => onCpfChange(event.target.value)}
+              placeholder="000.000.000-00"
+              maxLength={14}
+              inputMode="numeric"
+              className="w-full rounded-xl border border-slate-300 px-4 py-3 outline-none transition focus:border-transparent focus:ring-2 focus:ring-orange-400"
+            />
+            {errorMessage ? (
+              <div className="mt-4 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
+                {errorMessage}
+              </div>
+            ) : null}
+            <div className="mt-5 flex flex-col gap-3 sm:flex-row sm:justify-end">
+              <button
+                type="button"
+                onClick={onClose}
+                disabled={isBusy}
+                className="rounded-2xl border border-slate-200 bg-slate-100 px-5 py-3 font-semibold text-slate-700 transition hover:bg-slate-200 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={onCpfConfirm}
+                disabled={isBusy || !cpfReady}
+                className="rounded-2xl bg-orange-500 px-5 py-3 font-semibold text-white shadow-lg shadow-orange-100 transition hover:bg-orange-600 disabled:cursor-not-allowed disabled:bg-slate-300"
+              >
+                {isBusy ? "Validando..." : "Confirmar CPF"}
+              </button>
+            </div>
+          </div>
+        ) : null}
+
+        {step === "camera" ? (
+          <div className="mt-5 space-y-4">
+            {errorMessage ? (
+              <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+                {errorMessage}
+              </div>
+            ) : (
+              <p className="text-sm text-slate-600">Capture a imagem para validar por excecao.</p>
+            )}
+            <CameraCapture
+              mode="manual"
+              isBusy={isBusy}
+              onCapture={onCameraCapture}
+              onCancel={onBack}
+              initialFacingMode={cameraFacingMode}
+              onFacingModeChange={onCameraFacingModeChange}
+            />
+            <div className="flex justify-end">
+              <button
+                type="button"
+                onClick={onRetryCamera}
+                disabled={isBusy}
+                className="rounded-2xl border border-slate-200 bg-slate-100 px-5 py-3 font-semibold text-slate-700 transition hover:bg-slate-200 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                Tentar novamente
+              </button>
+            </div>
+          </div>
+        ) : null}
+
+        {step === "confirm" && result?.student ? (
+          <div className="mt-5 space-y-4">
+            <div className="rounded-[1.75rem] bg-[linear-gradient(135deg,#fff7ed_0%,#ffffff_55%,#eff6ff_100%)] p-5">
+              <div className="flex items-center gap-4">
+                {result.student.photo_url ? (
+                  <img
+                    src={result.student.photo_url}
+                    alt={result.student.full_name}
+                    className="h-20 w-20 rounded-[1.25rem] object-cover shadow-lg shadow-slate-200"
+                  />
+                ) : (
+                  <div className="flex h-20 w-20 items-center justify-center rounded-[1.25rem] bg-slate-200 text-slate-500 shadow-lg shadow-slate-200">
+                    <UserRound className="h-9 w-9" />
+                  </div>
+                )}
+                <div className="min-w-0">
+                  <p className="truncate text-xl font-black text-slate-900">{result.student.full_name}</p>
+                  <p className="mt-1 text-sm font-semibold text-slate-600">Turma: {result.student.class_name}</p>
+                  <p className="text-sm font-semibold text-slate-600">Ano: {result.student.school_year}</p>
+                </div>
+              </div>
+            </div>
+
+            <label className="flex items-start gap-3 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-semibold text-slate-700">
+              <input
+                type="checkbox"
+                checked={isConfirmed}
+                onChange={(event) => onConfirmCheckChange(event.target.checked)}
+                className="mt-1 h-4 w-4 rounded border-slate-300 text-orange-500"
+              />
+              Confirmo que este e o aluno correto para registrar por excecao.
+            </label>
+
+            {errorMessage ? (
+              <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
+                {errorMessage}
+              </div>
+            ) : null}
+
+            <div className="flex flex-col gap-3 sm:flex-row sm:justify-end">
+              <button
+                type="button"
+                onClick={onClose}
+                disabled={isBusy}
+                className="rounded-2xl border border-slate-200 bg-slate-100 px-5 py-3 font-semibold text-slate-700 transition hover:bg-slate-200 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={onConfirm}
+                disabled={!canConfirm}
+                className="rounded-2xl bg-orange-500 px-5 py-3 font-semibold text-white shadow-lg shadow-orange-100 transition hover:bg-orange-600 disabled:cursor-not-allowed disabled:bg-slate-300"
+              >
+                {isBusy ? "Confirmando..." : "Confirmar excecao"}
+              </button>
+            </div>
+          </div>
+        ) : null}
       </div>
     </div>
   );

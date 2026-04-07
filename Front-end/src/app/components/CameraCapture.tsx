@@ -123,7 +123,7 @@ const evaluateFaces = (
     box.x + box.width < frameWidth * 0.95 &&
     box.y + box.height < frameHeight * 0.95;
 
-  if (!inside || ox > 0.16 || oy > 0.19 || area < 0.08 || area > 0.72) {
+  if (!inside || ox > 0.22 || oy > 0.24 || area < 0.05 || area > 0.8) {
     return baseState("offframe", source, true, 0, box, frameWidth, frameHeight);
   }
   return baseState("aligned", source, true, prevStable + 1, box, frameWidth, frameHeight);
@@ -181,7 +181,7 @@ export default function CameraCapture({
   const [frameSize, setFrameSize] = useState({ width: 0, height: 0 });
 
   const strict = faceGuardMode === "required";
-  const faceReady = faceGuardMode === "off" || !face.detectorAvailable || (face.aligned && face.stableCount >= 3);
+  const faceReady = faceGuardMode === "off" || !face.detectorAvailable || (face.aligned && face.stableCount >= 2);
   const manualDisabled = mode === "manual" && strict && !faceReady;
 
   const setFaceSafe = useCallback((next: FaceState) => {
@@ -272,8 +272,8 @@ export default function CameraCapture({
     const canvas = canvasRef.current;
     if (!video || !canvas || video.videoWidth === 0 || video.videoHeight === 0) return;
 
-    // Revalidação imediata para bloquear captura quando surgir 0 ou múltiplos rostos.
-    if (faceGuardMode !== "off") {
+    // Revalidação imediata apenas quando o estado atual não estiver pronto.
+    if (faceGuardMode !== "off" && (!faceRef.current.aligned || faceRef.current.stableCount < 2)) {
       const detector = await ensureDetector();
       if (detector) {
         try {
@@ -455,7 +455,7 @@ export default function CameraCapture({
     void run();
     const interval = window.setInterval(() => {
       void run();
-    }, 220);
+    }, 170);
 
     return () => {
       active = false;

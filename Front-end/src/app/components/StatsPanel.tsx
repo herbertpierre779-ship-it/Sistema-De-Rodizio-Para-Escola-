@@ -6,17 +6,35 @@ import { getMealTypeLabel } from "../lib/constants";
 import type { ClassItem, MealEntry, MealType, SchoolYear, StudentItem } from "../types/api";
 
 type FilterValue = MealType | "all";
+type ExceptionFilterValue = MealType | "exception" | "all";
 type StudentYearFilter = SchoolYear | "all";
+type StudentFilterState = {
+  year: SchoolYear | "";
+  classId: string;
+};
 type StudentRecordsFilter = "today" | "all";
 type RankingPeriodMode = "day" | "month";
 type EntriesPeriodMode = "week" | "month";
+type HistoryPeriodMode = "today" | "week" | "month";
 type TotalsView = "today" | "week" | "month";
 
 type ChartPoint = { label: string; value: number };
 type WeekRange = { index: number; startDay: number; endDay: number; label: string };
 
 const mealFilterOptions: FilterValue[] = ["all", "almoco", "merenda", "sem_rodizio"];
+const exceptionFilterOptions: ExceptionFilterValue[] = ["all", "almoco", "merenda", "sem_rodizio", "exception"];
 const schoolYears: SchoolYear[] = ["1 ano", "2 ano", "3 ano"];
+
+function isKnownSchoolYear(value: string): value is SchoolYear {
+  return schoolYears.includes(value as SchoolYear);
+}
+
+function normalizeYearFilter(value: StudentYearFilter): StudentYearFilter {
+  if (value === "all") {
+    return "all";
+  }
+  return isKnownSchoolYear(value) ? value : "all";
+}
 
 function pad2(value: number) {
   return String(value).padStart(2, "0");
@@ -87,6 +105,25 @@ function formatEntryDateTime(recordedAt: string) {
   })}`;
 }
 
+function withCacheBust(url: string | null, versionHint?: string | null) {
+  if (!url) {
+    return null;
+  }
+  const version = (versionHint ?? "").trim();
+  if (!version) {
+    return url;
+  }
+  const separator = url.includes("?") ? "&" : "?";
+  return `${url}${separator}v=${encodeURIComponent(version)}`;
+}
+
+function studentPhotoVersion(student: Pick<StudentItem, "id" | "updated_at"> | null | undefined) {
+  if (!student) {
+    return null;
+  }
+  return `${student.id}-${student.updated_at}`;
+}
+
 function isSameDay(recordedAt: string, dayKey: string) {
   return toDayKey(new Date(recordedAt)) === dayKey;
 }
@@ -98,6 +135,16 @@ function isSameMonth(recordedAt: string, monthKey: string) {
 function filterEntriesByMeal(entries: MealEntry[], filter: FilterValue) {
   if (filter === "all") {
     return entries;
+  }
+  return entries.filter((entry) => entry.meal_type === filter);
+}
+
+function filterExceptionEntriesByType(entries: MealEntry[], filter: ExceptionFilterValue) {
+  if (filter === "all") {
+    return entries;
+  }
+  if (filter === "exception") {
+    return entries.filter((entry) => entry.source === "excecao");
   }
   return entries.filter((entry) => entry.meal_type === filter);
 }
@@ -179,6 +226,38 @@ function MealFilterPills({
   );
 }
 
+function ExceptionFilterPills({
+  value,
+  onChange,
+}: {
+  value: ExceptionFilterValue;
+  onChange: (value: ExceptionFilterValue) => void;
+}) {
+  return (
+    <div className="flex gap-2 overflow-x-auto pb-1">
+      {exceptionFilterOptions.map((option) => {
+        const isActive = value === option;
+        const label = option === "all" ? "Todas" : option === "exception" ? "Excecao" : getMealTypeLabel(option);
+
+        return (
+          <button
+            key={option}
+            type="button"
+            onClick={() => onChange(option)}
+            className={`whitespace-nowrap rounded-2xl px-4 py-3 text-sm font-semibold transition ${
+              isActive
+                ? "bg-slate-950 text-white shadow-lg shadow-slate-200"
+                : "border border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
+            }`}
+          >
+            {label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 function OverviewStatCard({
   title,
   value,
@@ -222,6 +301,42 @@ function TodayMealCard({
       <p className="text-sm font-semibold">{title}</p>
       <p className="mt-2 text-4xl font-black leading-none">{value}</p>
     </div>
+  );
+}
+
+function ExceptionEntryCard({
+  entry,
+  photoUrl,
+  photoVersion,
+}: {
+  entry: MealEntry;
+  photoUrl: string | null;
+  photoVersion?: string | null;
+}) {
+  const resolvedPhotoUrl = withCacheBust(photoUrl, photoVersion);
+  return (
+    <article className="rounded-2xl border border-slate-200 bg-white px-4 py-3">
+      <div className="flex items-center gap-3">
+        {resolvedPhotoUrl ? (
+          <img src={resolvedPhotoUrl} alt={entry.student_name} className="h-12 w-12 rounded-xl object-cover" />
+        ) : (
+          <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-slate-200 text-slate-500">
+            <Users className="h-5 w-5" />
+          </div>
+        )}
+        <div className="min-w-0">
+          <p className="truncate font-semibold text-slate-900">{entry.student_name}</p>
+          <p className="truncate text-sm text-slate-500">{entry.class_display_name}</p>
+        </div>
+      </div>
+      <div className="mt-3 flex flex-wrap items-center gap-2 text-xs font-semibold uppercase tracking-[0.14em] text-slate-500">
+        <span className="rounded-full bg-slate-950 px-3 py-1 text-white">{getMealTypeLabel(entry.meal_type)}</span>
+        <span className="rounded-full border border-slate-200 bg-slate-100 px-3 py-1 text-slate-700">
+          {entry.source === "excecao" ? "Excecao" : "Padrao"}
+        </span>
+      </div>
+      <p className="mt-2 text-sm text-slate-500">{formatEntryDateTime(entry.recorded_at)}</p>
+    </article>
   );
 }
 
@@ -311,8 +426,17 @@ export default function StatsPanel() {
   const [entriesSelectedWeekIndex, setEntriesSelectedWeekIndex] = useState(currentWeekIndex);
   const [isEntriesFilterOpen, setIsEntriesFilterOpen] = useState(false);
 
-  const [studentYearFilter, setStudentYearFilter] = useState<StudentYearFilter>("all");
-  const [studentClassFilter, setStudentClassFilter] = useState<string>("all");
+  const [exceptionMealFilter, setExceptionMealFilter] = useState<ExceptionFilterValue>("all");
+  const [exceptionPeriodMode, setExceptionPeriodMode] = useState<HistoryPeriodMode>("month");
+  const [exceptionSelectedMonthKey, setExceptionSelectedMonthKey] = useState(currentMonthKey);
+  const [exceptionSelectedWeekIndex, setExceptionSelectedWeekIndex] = useState(currentWeekIndex);
+  const [exceptionYearFilter, setExceptionYearFilter] = useState<StudentYearFilter>("all");
+  const [exceptionClassFilter, setExceptionClassFilter] = useState<string>("all");
+  const [isExceptionFilterOpen, setIsExceptionFilterOpen] = useState(false);
+
+  const [studentFilterDraftYear, setStudentFilterDraftYear] = useState<SchoolYear | "">("");
+  const [studentFilterDraftClassId, setStudentFilterDraftClassId] = useState<string>("");
+  const [appliedStudentFilter, setAppliedStudentFilter] = useState<StudentFilterState | null>(null);
   const [isStudentFilterOpen, setIsStudentFilterOpen] = useState(false);
   const [selectedStudentForStats, setSelectedStudentForStats] = useState<StudentItem | null>(null);
   const [isStudentStatsOpen, setIsStudentStatsOpen] = useState(false);
@@ -353,7 +477,7 @@ export default function StatsPanel() {
   }, [token]);
 
   useEffect(() => {
-    if (!isRankFilterOpen && !isEntriesFilterOpen && !isStudentFilterOpen && !isStudentStatsOpen) {
+    if (!isRankFilterOpen && !isEntriesFilterOpen && !isExceptionFilterOpen && !isStudentFilterOpen && !isStudentStatsOpen) {
       return;
     }
     const previousOverflow = document.body.style.overflow;
@@ -361,7 +485,7 @@ export default function StatsPanel() {
     return () => {
       document.body.style.overflow = previousOverflow;
     };
-  }, [isRankFilterOpen, isEntriesFilterOpen, isStudentFilterOpen, isStudentStatsOpen]);
+  }, [isRankFilterOpen, isEntriesFilterOpen, isExceptionFilterOpen, isStudentFilterOpen, isStudentStatsOpen]);
 
   const availableMonthKeys = useMemo(() => {
     const monthSet = new Set<string>([currentMonthKey]);
@@ -378,6 +502,10 @@ export default function StatsPanel() {
   );
 
   const entriesWeeksForSelectedMonth = useMemo(() => buildWeekRanges(entriesSelectedMonthKey), [entriesSelectedMonthKey]);
+  const exceptionWeeksForSelectedMonth = useMemo(
+    () => buildWeekRanges(exceptionSelectedMonthKey),
+    [exceptionSelectedMonthKey],
+  );
 
   useEffect(() => {
     if (!entriesWeeksForSelectedMonth.some((week) => week.index === entriesSelectedWeekIndex)) {
@@ -385,34 +513,71 @@ export default function StatsPanel() {
     }
   }, [entriesSelectedWeekIndex, entriesWeeksForSelectedMonth]);
 
+  useEffect(() => {
+    if (!exceptionWeeksForSelectedMonth.some((week) => week.index === exceptionSelectedWeekIndex)) {
+      setExceptionSelectedWeekIndex(exceptionWeeksForSelectedMonth[0]?.index ?? 1);
+    }
+  }, [exceptionSelectedWeekIndex, exceptionWeeksForSelectedMonth]);
+
   const selectedEntriesWeek = useMemo(
     () => entriesWeeksForSelectedMonth.find((week) => week.index === entriesSelectedWeekIndex) ?? entriesWeeksForSelectedMonth[0],
     [entriesSelectedWeekIndex, entriesWeeksForSelectedMonth],
   );
+  const selectedExceptionWeek = useMemo(
+    () =>
+      exceptionWeeksForSelectedMonth.find((week) => week.index === exceptionSelectedWeekIndex) ??
+      exceptionWeeksForSelectedMonth[0],
+    [exceptionSelectedWeekIndex, exceptionWeeksForSelectedMonth],
+  );
 
   const classFilterOptions = useMemo(() => {
+    const source = studentFilterDraftYear
+      ? classes.filter((classItem) => classItem.school_year === studentFilterDraftYear)
+      : classes;
+    return [...source].sort((first, second) => first.name.localeCompare(second.name, "pt-BR"));
+  }, [classes, studentFilterDraftYear]);
+  const exceptionClassFilterOptions = useMemo(() => {
+    const normalizedYearFilter = normalizeYearFilter(exceptionYearFilter);
     const byYear =
-      studentYearFilter === "all"
+      normalizedYearFilter === "all"
         ? classes
-        : classes.filter((classItem) => classItem.school_year === studentYearFilter);
-    return [...byYear].sort((first, second) => first.display_name.localeCompare(second.display_name, "pt-BR"));
-  }, [classes, studentYearFilter]);
+        : classes.filter((classItem) => classItem.school_year === normalizedYearFilter);
+    return [...byYear].sort((first, second) => first.name.localeCompare(second.name, "pt-BR"));
+  }, [classes, exceptionYearFilter]);
 
   const filteredStudents = useMemo(() => {
+    if (!appliedStudentFilter) {
+      return [];
+    }
     return students
-      .filter((student) => (studentYearFilter === "all" ? true : student.school_year === studentYearFilter))
-      .filter((student) => (studentClassFilter === "all" ? true : student.class_id === studentClassFilter))
+      .filter((student) => (appliedStudentFilter.year ? student.school_year === appliedStudentFilter.year : true))
+      .filter((student) => (appliedStudentFilter.classId ? student.class_id === appliedStudentFilter.classId : true))
       .sort((first, second) => first.full_name.localeCompare(second.full_name, "pt-BR"));
-  }, [studentClassFilter, studentYearFilter, students]);
+  }, [appliedStudentFilter, students]);
 
   useEffect(() => {
-    if (studentClassFilter === "all") {
+    const normalizedYearFilter = normalizeYearFilter(exceptionYearFilter);
+    if (normalizedYearFilter !== exceptionYearFilter) {
+      setExceptionYearFilter("all");
+    }
+  }, [exceptionYearFilter]);
+
+  useEffect(() => {
+    if (!studentFilterDraftClassId) {
       return;
     }
-    if (!classFilterOptions.some((classItem) => classItem.id === studentClassFilter)) {
-      setStudentClassFilter("all");
+    if (!classFilterOptions.some((classItem) => classItem.id === studentFilterDraftClassId)) {
+      setStudentFilterDraftClassId("");
     }
-  }, [classFilterOptions, studentClassFilter]);
+  }, [classFilterOptions, studentFilterDraftClassId]);
+  useEffect(() => {
+    if (exceptionClassFilter === "all") {
+      return;
+    }
+    if (!exceptionClassFilterOptions.some((classItem) => classItem.id === exceptionClassFilter)) {
+      setExceptionClassFilter("all");
+    }
+  }, [exceptionClassFilter, exceptionClassFilterOptions]);
 
   const todayEntries = useMemo(
     () => allEntries.filter((entry) => isSameDay(entry.recorded_at, todayKey)),
@@ -474,6 +639,12 @@ export default function StatsPanel() {
     rankPeriodMode === "day"
       ? `Dia ${formatDayLabel(rankSelectedDayKey)}`
       : `Mes ${formatMonthLabel(rankSelectedMonthKey)}`;
+  const exceptionPeriodLabel =
+    exceptionPeriodMode === "today"
+      ? `Hoje (${formatDayLabel(todayKey)})`
+      : exceptionPeriodMode === "week"
+      ? selectedExceptionWeek?.label ?? "Semana atual"
+      : `Mes ${formatMonthLabel(exceptionSelectedMonthKey)}`;
 
   const classRankingPoints = useMemo(() => {
     const entriesByPeriod = filterEntriesByRankingPeriod(allEntries, rankPeriodMode, rankSelectedDayKey, rankSelectedMonthKey);
@@ -535,6 +706,48 @@ export default function StatsPanel() {
 
     return points;
   }, [allEntries, dailyMealFilter, entriesPeriodMode, entriesSelectedMonthKey, selectedEntriesWeek]);
+  const studentsById = useMemo(() => {
+    const map = new Map<string, StudentItem>();
+    students.forEach((student) => {
+      map.set(student.id, student);
+    });
+    return map;
+  }, [students]);
+  const visibleExceptionEntries = useMemo(() => {
+    let filtered = [...allEntries];
+    filtered = filterExceptionEntriesByType(filtered, exceptionMealFilter);
+    if (exceptionPeriodMode === "today") {
+      filtered = filtered.filter((entry) => isSameDay(entry.recorded_at, todayKey));
+    } else if (exceptionPeriodMode === "week") {
+      filtered = filtered.filter((entry) => {
+        if (!isSameMonth(entry.recorded_at, exceptionSelectedMonthKey) || !selectedExceptionWeek) {
+          return false;
+        }
+        const day = new Date(entry.recorded_at).getDate();
+        return day >= selectedExceptionWeek.startDay && day <= selectedExceptionWeek.endDay;
+      });
+    } else {
+      filtered = filtered.filter((entry) => isSameMonth(entry.recorded_at, exceptionSelectedMonthKey));
+    }
+    const normalizedExceptionYearFilter = normalizeYearFilter(exceptionYearFilter);
+    if (normalizedExceptionYearFilter !== "all") {
+      filtered = filtered.filter((entry) => entry.school_year === normalizedExceptionYearFilter);
+    }
+    if (exceptionClassFilter !== "all") {
+      filtered = filtered.filter((entry) => entry.class_id === exceptionClassFilter);
+    }
+    return filtered.sort((first, second) => new Date(second.recorded_at).getTime() - new Date(first.recorded_at).getTime());
+  }, [
+    allEntries,
+    exceptionClassFilter,
+    exceptionMealFilter,
+    exceptionPeriodMode,
+    exceptionSelectedMonthKey,
+    exceptionYearFilter,
+    selectedExceptionWeek,
+    todayKey,
+  ]);
+  const shouldEnableHistoryScroll = visibleExceptionEntries.length > 6;
 
   const studentEntries = useMemo(() => {
     if (!selectedStudentForStats) {
@@ -575,6 +788,27 @@ export default function StatsPanel() {
     }
     return result;
   }, [currentMonthKey]);
+
+  const isStudentFilterReadyToApply = Boolean(
+    studentFilterDraftYear || studentFilterDraftClassId,
+  );
+
+  const openStudentFilter = () => {
+    setStudentFilterDraftYear(appliedStudentFilter?.year ?? "");
+    setStudentFilterDraftClassId(appliedStudentFilter?.classId ?? "");
+    setIsStudentFilterOpen(true);
+  };
+
+  const applyStudentFilter = () => {
+    if (!studentFilterDraftYear && !studentFilterDraftClassId) {
+      return;
+    }
+    setAppliedStudentFilter({
+      year: studentFilterDraftYear,
+      classId: studentFilterDraftClassId,
+    });
+    setIsStudentFilterOpen(false);
+  };
 
   return (
     <div className="space-y-5 sm:space-y-6">
@@ -680,7 +914,9 @@ export default function StatsPanel() {
           <section className="rounded-[2rem] border border-slate-200 bg-white p-4 shadow-lg shadow-slate-200 sm:p-6">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
-                <p className="text-sm font-semibold uppercase tracking-[0.25em] text-slate-500">Entradas por dia</p>
+                <p className="text-sm font-semibold uppercase tracking-[0.25em] text-slate-500">
+                  {entriesPeriodMode === "month" ? "Entradas e saida por mes" : "Entradas e saida por dia"}
+                </p>
                 <p className="mt-1 text-sm text-slate-500">
                   {entriesPeriodMode === "week"
                     ? selectedEntriesWeek?.label ?? "Semana atual"
@@ -712,9 +948,56 @@ export default function StatsPanel() {
             </div>
           </section>
 
+          <section className="rounded-[2rem] border border-slate-200 bg-white p-4 shadow-lg shadow-slate-200 sm:p-6">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <p className="text-sm font-semibold uppercase tracking-[0.25em] text-slate-500">Historico de refeicoes</p>
+                <p className="mt-1 text-sm text-slate-500">{exceptionPeriodLabel}</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsExceptionFilterOpen(true)}
+                className="inline-flex items-center gap-2 rounded-2xl border border-slate-200 bg-slate-100 px-4 py-3 text-sm font-semibold text-slate-700 transition hover:bg-slate-200"
+              >
+                <Filter className="h-4 w-4" />
+                Filtro
+              </button>
+            </div>
+
+            <div className="mt-3 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
+              Ano: <span className="font-semibold">{normalizeYearFilter(exceptionYearFilter) === "all" ? "Todos" : normalizeYearFilter(exceptionYearFilter)}</span> | Turma:{" "}
+              <span className="font-semibold">
+                {exceptionClassFilter === "all"
+                  ? "Todas"
+                  : classes.find((classItem) => classItem.id === exceptionClassFilter)?.name ?? "Todas"}
+              </span>
+            </div>
+
+            <div className="mt-4">
+              <ExceptionFilterPills value={exceptionMealFilter} onChange={setExceptionMealFilter} />
+            </div>
+
+            <div className={`mt-5 space-y-3 pr-1 ${shouldEnableHistoryScroll ? "max-h-[34rem] overflow-y-auto" : ""}`}>
+              {visibleExceptionEntries.length === 0 ? (
+                <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-4 text-sm text-slate-500">
+                  Nenhuma entrada para o filtro selecionado.
+                </div>
+              ) : (
+                visibleExceptionEntries.map((entry) => (
+                  <ExceptionEntryCard
+                    key={entry.id}
+                    entry={entry}
+                    photoUrl={studentsById.get(entry.student_id)?.photo_url ?? null}
+                    photoVersion={studentPhotoVersion(studentsById.get(entry.student_id))}
+                  />
+                ))
+              )}
+            </div>
+          </section>
+
           <div className="grid gap-5 xl:grid-cols-2">
             <RankingCard
-              title="Turmas com mais entrada"
+              title="Turmas com mais refeicoes"
               periodLabel={rankPeriodLabel}
               filterValue={classRankMealFilter}
               onFilterChange={setClassRankMealFilter}
@@ -723,7 +1006,7 @@ export default function StatsPanel() {
               showPosition
             />
             <RankingCard
-              title="Ano com mais entrada"
+              title="Ano com mais refeicao"
               periodLabel={rankPeriodLabel}
               filterValue={yearRankMealFilter}
               onFilterChange={setYearRankMealFilter}
@@ -743,7 +1026,7 @@ export default function StatsPanel() {
               </div>
               <button
                 type="button"
-                onClick={() => setIsStudentFilterOpen(true)}
+                onClick={openStudentFilter}
                 className="inline-flex items-center gap-2 rounded-2xl border border-slate-200 bg-slate-100 px-4 py-3 text-sm font-semibold text-slate-700 transition hover:bg-slate-200"
               >
                 <Filter className="h-4 w-4" />
@@ -752,16 +1035,21 @@ export default function StatsPanel() {
             </div>
 
             <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
-              Ano: <span className="font-semibold">{studentYearFilter === "all" ? "Todos" : studentYearFilter}</span> | Turma:{" "}
-              <span className="font-semibold">
-                {studentClassFilter === "all"
-                  ? "Todas"
-                  : classes.find((classItem) => classItem.id === studentClassFilter)?.display_name ?? "Todas"}
-              </span>
+              {appliedStudentFilter ? (
+                <>
+                  Ano: <span className="font-semibold">{appliedStudentFilter.year || "Todos"}</span> | Turma:{" "}
+                  <span className="font-semibold">
+                    {classes.find((classItem) => classItem.id === appliedStudentFilter.classId)?.name ??
+                      (appliedStudentFilter.classId ? "Turma nao encontrada" : "Todas")}
+                  </span>{" "}
+                </>
+              ) : (
+                "Ano: Todos | Turma: Todas"
+              )}
             </div>
 
             <div className="mt-5 max-h-[48vh] space-y-3 overflow-y-auto pr-1">
-              {filteredStudents.length === 0 ? (
+              {!appliedStudentFilter ? null : filteredStudents.length === 0 ? (
                 <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-4 text-sm text-slate-500">
                   Nenhum aluno encontrado para o filtro selecionado.
                 </div>
@@ -778,7 +1066,11 @@ export default function StatsPanel() {
                     className="flex w-full items-center gap-3 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-left transition hover:border-slate-300 hover:bg-slate-50"
                   >
                     {student.photo_url ? (
-                      <img src={student.photo_url} alt={student.full_name} className="h-12 w-12 rounded-xl object-cover" />
+                      <img
+                        src={withCacheBust(student.photo_url, studentPhotoVersion(student)) ?? student.photo_url}
+                        alt={student.full_name}
+                        className="h-12 w-12 rounded-xl object-cover"
+                      />
                     ) : (
                       <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-slate-200 text-slate-500">
                         <Users className="h-5 w-5" />
@@ -883,7 +1175,9 @@ export default function StatsPanel() {
         <div className="fixed inset-0 z-[76] flex items-end justify-center bg-slate-950/55 px-3 py-4 backdrop-blur-sm sm:items-center sm:px-4">
           <div className="w-full max-w-md rounded-[2rem] border border-white/70 bg-white p-6 shadow-2xl shadow-slate-900/20 sm:p-7">
             <div className="flex items-center justify-between gap-3">
-              <h3 className="text-xl font-black text-slate-900">Filtro de entradas por dia</h3>
+              <h3 className="text-xl font-black text-slate-900">
+                {entriesPeriodMode === "month" ? "Filtro de entradas e saida por mes" : "Filtro de entradas e saida por dia"}
+              </h3>
               <button
                 type="button"
                 onClick={() => setIsEntriesFilterOpen(false)}
@@ -962,6 +1256,132 @@ export default function StatsPanel() {
         </div>
       )}
 
+      {isExceptionFilterOpen && (
+        <div className="fixed inset-0 z-[77] flex items-end justify-center bg-slate-950/55 px-3 py-4 backdrop-blur-sm sm:items-center sm:px-4">
+          <div className="w-full max-w-md rounded-[2rem] border border-white/70 bg-white p-6 shadow-2xl shadow-slate-900/20 sm:p-7">
+            <div className="flex items-center justify-between gap-3">
+              <h3 className="text-xl font-black text-slate-900">Filtro do historico</h3>
+              <button
+                type="button"
+                onClick={() => setIsExceptionFilterOpen(false)}
+                className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-slate-200 bg-slate-100 text-slate-700 transition hover:bg-slate-200"
+                aria-label="Fechar filtro"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="mt-5 grid grid-cols-3 gap-2">
+              <button
+                type="button"
+                onClick={() => setExceptionPeriodMode("today")}
+                className={`rounded-xl px-4 py-3 text-sm font-semibold transition ${
+                  exceptionPeriodMode === "today"
+                    ? "bg-slate-950 text-white"
+                    : "border border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
+                }`}
+              >
+                Hoje
+              </button>
+              <button
+                type="button"
+                onClick={() => setExceptionPeriodMode("week")}
+                className={`rounded-xl px-4 py-3 text-sm font-semibold transition ${
+                  exceptionPeriodMode === "week"
+                    ? "bg-slate-950 text-white"
+                    : "border border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
+                }`}
+              >
+                Semana
+              </button>
+              <button
+                type="button"
+                onClick={() => setExceptionPeriodMode("month")}
+                className={`rounded-xl px-4 py-3 text-sm font-semibold transition ${
+                  exceptionPeriodMode === "month"
+                    ? "bg-slate-950 text-white"
+                    : "border border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
+                }`}
+              >
+                Mes
+              </button>
+            </div>
+
+            {exceptionPeriodMode !== "today" ? (
+              <div className="mt-4">
+                <label className="mb-2 block text-sm font-semibold text-slate-700">Mes</label>
+                <select
+                  value={exceptionSelectedMonthKey}
+                  onChange={(event) => setExceptionSelectedMonthKey(event.target.value)}
+                  className="w-full rounded-xl border border-slate-300 bg-white px-4 py-3 outline-none transition focus:border-transparent focus:ring-2 focus:ring-orange-400"
+                >
+                  {availableMonthKeys.map((monthKey) => (
+                    <option key={monthKey} value={monthKey}>
+                      {formatMonthLabel(monthKey)}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            ) : null}
+
+            {exceptionPeriodMode === "week" && (
+              <div className="mt-4">
+                <label className="mb-2 block text-sm font-semibold text-slate-700">Semana</label>
+                <select
+                  value={exceptionSelectedWeekIndex}
+                  onChange={(event) => setExceptionSelectedWeekIndex(Number(event.target.value))}
+                  className="w-full rounded-xl border border-slate-300 bg-white px-4 py-3 outline-none transition focus:border-transparent focus:ring-2 focus:ring-orange-400"
+                >
+                  {exceptionWeeksForSelectedMonth.map((week) => (
+                    <option key={week.index} value={week.index}>
+                      {week.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+
+            <div className="mt-4">
+              <label className="mb-2 block text-sm font-semibold text-slate-700">Ano</label>
+              <select
+                value={exceptionYearFilter}
+                onChange={(event) => setExceptionYearFilter(event.target.value as StudentYearFilter)}
+                className="w-full rounded-xl border border-slate-300 bg-white px-4 py-3 outline-none transition focus:border-transparent focus:ring-2 focus:ring-orange-400"
+              >
+                <option value="all">Todos</option>
+                <option value="1 ano">1 ano</option>
+                <option value="2 ano">2 ano</option>
+                <option value="3 ano">3 ano</option>
+              </select>
+            </div>
+
+            <div className="mt-4">
+              <label className="mb-2 block text-sm font-semibold text-slate-700">Turma</label>
+              <select
+                value={exceptionClassFilter}
+                onChange={(event) => setExceptionClassFilter(event.target.value)}
+                className="w-full rounded-xl border border-slate-300 bg-white px-4 py-3 outline-none transition focus:border-transparent focus:ring-2 focus:ring-orange-400"
+              >
+                <option value="all">Todas</option>
+                {exceptionClassFilterOptions.map((classItem) => (
+                  <option key={classItem.id} value={classItem.id}>
+                    {classItem.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => setIsExceptionFilterOpen(false)}
+              className="mt-6 w-full rounded-2xl bg-slate-950 px-4 py-3 text-sm font-semibold text-white transition hover:bg-slate-800"
+            >
+              Aplicar filtro
+            </button>
+          </div>
+        </div>
+      )}
+
       {isStudentFilterOpen && (
         <div className="fixed inset-0 z-[77] flex items-end justify-center bg-slate-950/55 px-3 py-4 backdrop-blur-sm sm:items-center sm:px-4">
           <div className="w-full max-w-md rounded-[2rem] border border-white/70 bg-white p-6 shadow-2xl shadow-slate-900/20 sm:p-7">
@@ -981,11 +1401,11 @@ export default function StatsPanel() {
               <div>
                 <label className="mb-2 block text-sm font-semibold text-slate-700">Ano</label>
                 <select
-                  value={studentYearFilter}
-                  onChange={(event) => setStudentYearFilter(event.target.value as StudentYearFilter)}
+                  value={studentFilterDraftYear}
+                  onChange={(event) => setStudentFilterDraftYear(event.target.value as SchoolYear | "")}
                   className="w-full rounded-xl border border-slate-300 bg-white px-4 py-3 outline-none transition focus:border-transparent focus:ring-2 focus:ring-orange-400"
                 >
-                  <option value="all">Todos</option>
+                  <option value="">Selecione</option>
                   <option value="1 ano">1 ano</option>
                   <option value="2 ano">2 ano</option>
                   <option value="3 ano">3 ano</option>
@@ -995,14 +1415,14 @@ export default function StatsPanel() {
               <div>
                 <label className="mb-2 block text-sm font-semibold text-slate-700">Turma</label>
                 <select
-                  value={studentClassFilter}
-                  onChange={(event) => setStudentClassFilter(event.target.value)}
+                  value={studentFilterDraftClassId}
+                  onChange={(event) => setStudentFilterDraftClassId(event.target.value)}
                   className="w-full rounded-xl border border-slate-300 bg-white px-4 py-3 outline-none transition focus:border-transparent focus:ring-2 focus:ring-orange-400"
                 >
-                  <option value="all">Todas</option>
+                  <option value="">Todas</option>
                   {classFilterOptions.map((classItem) => (
                     <option key={classItem.id} value={classItem.id}>
-                      {classItem.display_name}
+                      {classItem.name}
                     </option>
                   ))}
                 </select>
@@ -1011,8 +1431,9 @@ export default function StatsPanel() {
 
             <button
               type="button"
-              onClick={() => setIsStudentFilterOpen(false)}
-              className="mt-6 w-full rounded-2xl bg-slate-950 px-4 py-3 text-sm font-semibold text-white transition hover:bg-slate-800"
+              onClick={applyStudentFilter}
+              disabled={!isStudentFilterReadyToApply}
+              className="mt-6 w-full rounded-2xl bg-slate-950 px-4 py-3 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
             >
               Aplicar filtro
             </button>

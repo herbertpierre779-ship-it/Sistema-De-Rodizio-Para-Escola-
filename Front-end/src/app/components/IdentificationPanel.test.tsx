@@ -324,4 +324,100 @@ describe("IdentificationPanel", () => {
     expect(screen.queryByRole("button", { name: /merenda/i })).toBeNull();
     expect(screen.queryByRole("button", { name: /sem rod/i })).toBeNull();
   });
+
+  it("exibe o botao Excecao apenas quando almoco esta selecionado", async () => {
+    render(<IdentificationPanel />);
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /merenda/i })).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /merenda/i }));
+    expect(screen.queryByRole("button", { name: /excecao/i })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: /trocar refei/i }));
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /almo/i })).toBeTruthy();
+    });
+    fireEvent.click(screen.getByRole("button", { name: /almo/i }));
+    expect(screen.getByRole("button", { name: /excecao/i })).toBeTruthy();
+  });
+
+  it("fluxo de excecao por CPF so confirma com checkbox e salva source excecao", async () => {
+    identifyByCpfMock.mockResolvedValueOnce(
+      buildRecognitionResult({
+        status: "low_confidence",
+        matched: true,
+        meal_type: "almoco",
+        message: "Aluno localizado por CPF. Conferencia manual obrigatoria.",
+        student: {
+          id: "student-exception",
+          full_name: "ALUNO EXCECAO",
+          class_id: "class-1",
+          class_name: "A",
+          class_display_name: "1 ano - A",
+          school_year: "1 ano",
+          photo_url: null,
+        },
+      }),
+    );
+    mealCreateMock.mockResolvedValueOnce({
+      id: "entry-1",
+    });
+
+    render(<IdentificationPanel />);
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /almo/i })).toBeTruthy();
+    });
+    fireEvent.click(screen.getByRole("button", { name: /almo/i }));
+    fireEvent.click(screen.getByRole("button", { name: /excecao/i }));
+    fireEvent.click(screen.getByRole("button", { name: /cpf validar aluno/i }));
+
+    fireEvent.change(screen.getByLabelText(/cpf do aluno/i), { target: { value: "529.982.247-25" } });
+    fireEvent.click(screen.getByRole("button", { name: /confirmar cpf/i }));
+
+    await waitFor(() => {
+      expect(screen.getByText("ALUNO EXCECAO")).toBeTruthy();
+    });
+
+    const confirmButton = screen.getByRole("button", { name: /confirmar excecao/i });
+    expect(confirmButton).toHaveProperty("disabled", true);
+    fireEvent.click(screen.getByLabelText(/confirmo que este e o aluno correto/i));
+    expect(confirmButton).toHaveProperty("disabled", false);
+    fireEvent.click(confirmButton);
+
+    await waitFor(() => {
+      expect(mealCreateMock).toHaveBeenCalledWith(
+        "test-token",
+        expect.objectContaining({
+          student_id: "student-exception",
+          meal_type: "almoco",
+          source: "excecao",
+        }),
+      );
+    });
+  });
+
+  it("fluxo de excecao por camera mostra erro e permite tentar novamente", async () => {
+    identifyMock.mockResolvedValueOnce(
+      buildRecognitionResult({
+        status: "no_face_detected",
+        meal_type: "almoco",
+        message: "Nenhum rosto detectado na imagem enviada.",
+      }),
+    );
+
+    render(<IdentificationPanel />);
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /almo/i })).toBeTruthy();
+    });
+    fireEvent.click(screen.getByRole("button", { name: /almo/i }));
+    fireEvent.click(screen.getByRole("button", { name: /excecao/i }));
+    fireEvent.click(screen.getByRole("button", { name: /camera validar aluno/i }));
+    fireEvent.click(screen.getByRole("button", { name: /capturar mock/i }));
+
+    await waitFor(() => {
+      expect(screen.getByText(/nenhum rosto detectado/i)).toBeTruthy();
+    });
+    expect(screen.getByRole("button", { name: /tentar novamente/i })).toBeTruthy();
+  });
 });

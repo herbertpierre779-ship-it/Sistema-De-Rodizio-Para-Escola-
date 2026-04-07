@@ -110,8 +110,23 @@ class SqliteStore:
                     FOREIGN KEY (student_id) REFERENCES students(id) ON DELETE CASCADE
                 );
 
+                CREATE TABLE IF NOT EXISTS face_embedding_samples (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    student_id INTEGER NOT NULL,
+                    engine TEXT NOT NULL,
+                    vector_json TEXT NOT NULL,
+                    source_image_path TEXT NOT NULL,
+                    quality_score REAL NOT NULL DEFAULT 0.0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(student_id, source_image_path),
+                    FOREIGN KEY (student_id) REFERENCES students(id) ON DELETE CASCADE
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_students_cpf ON students(cpf);
                 CREATE INDEX IF NOT EXISTS idx_students_class_id ON students(class_id);
+                CREATE INDEX IF NOT EXISTS idx_face_embedding_samples_student_id ON face_embedding_samples(student_id);
+                CREATE INDEX IF NOT EXISTS idx_face_embedding_samples_quality ON face_embedding_samples(quality_score);
 
                 CREATE TABLE IF NOT EXISTS app_settings (
                     key TEXT PRIMARY KEY,

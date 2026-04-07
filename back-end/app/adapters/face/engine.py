@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import hashlib
-import io
+import threading
 from dataclasses import dataclass
+from pathlib import Path
 
 from app.models.entities import RecognitionStatus
 
@@ -13,6 +14,9 @@ class FaceExtractionResult:
     vector: list[float] | None
     message: str
     engine: str
+    quality_score: float | None = None
+    cropped_image_bytes: bytes | None = None
+    normalized_image_bytes: bytes | None = None
 
 
 class BaseFaceEngine:
@@ -53,6 +57,7 @@ class MockFaceEngine(BaseFaceEngine):
                     vector=vector,
                     message="Embedding gerado em modo mock a partir do vetor informado.",
                     engine=self.engine_name,
+                    quality_score=0.75,
                 )
 
         digest = hashlib.sha256(image_bytes).digest()
@@ -62,141 +67,157 @@ class MockFaceEngine(BaseFaceEngine):
             vector=vector,
             message="Embedding gerado em modo mock.",
             engine=self.engine_name,
+            quality_score=0.65,
         )
 
 
-class FaceRecognitionLibraryEngine(BaseFaceEngine):
-    engine_name = "face_recognition"
+class NaoGazeiFaceEngine(BaseFaceEngine):
+    engine_name = "naogazei_face"
 
-    def __init__(self) -> None:
-        import face_recognition  # type: ignore[import-not-found]
-        import numpy as np
-
-        self.face_recognition = face_recognition
-        self.np = np
-
-    def _detect_locations(self, image) -> list[tuple[int, int, int, int]]:
-        for upsample in (0, 1, 2):
-            locations = self.face_recognition.face_locations(
-                image,
-                number_of_times_to_upsample=upsample,
-                model="hog",
-            )
-            if locations:
-                return locations
-        return []
-
-    def extract_embedding(self, image_bytes: bytes) -> FaceExtractionResult:
-        image = self.face_recognition.load_image_file(io.BytesIO(image_bytes))
-        locations = self._detect_locations(image)
-        if len(locations) == 0:
-            # Low-light fallback: stretch contrast and retry.
-            enhanced = self.np.clip((image.astype("float32") - 110.0) * 1.35 + 128.0, 0, 255).astype("uint8")
-            locations = self._detect_locations(enhanced)
-            if len(locations) == 1:
-                image = enhanced
-
-        if len(locations) == 0:
-            return FaceExtractionResult(
-                status=RecognitionStatus.no_face_detected,
-                vector=None,
-                message="Nenhum rosto detectado na imagem enviada.",
-                engine=self.engine_name,
-            )
-        if len(locations) > 1:
-            return FaceExtractionResult(
-                status=RecognitionStatus.multiple_faces_detected,
-                vector=None,
-                message="Mais de um rosto foi detectado na imagem enviada.",
-                engine=self.engine_name,
-            )
-
-        encodings = self.face_recognition.face_encodings(
-            image,
-            known_face_locations=locations,
-            num_jitters=2,
-            model="small",
-        )
-        if not encodings:
-            return FaceExtractionResult(
-                status=RecognitionStatus.no_face_detected,
-                vector=None,
-                message="Não foi possível gerar o embedding facial.",
-                engine=self.engine_name,
-            )
-
-        vector = [float(value) for value in encodings[0].tolist()]
-        return FaceExtractionResult(
-            status=RecognitionStatus.success,
-            vector=vector,
-            message="Embedding facial gerado com face_recognition.",
-            engine=self.engine_name,
-        )
-
-
-class OpenCvHistogramFaceEngine(BaseFaceEngine):
-    engine_name = "opencv"
-
-    def __init__(self) -> None:
+    def __init__(self, models_dir: Path) -> None:
         import cv2  # type: ignore[import-not-found]
         import numpy as np
 
         self.cv2 = cv2
         self.np = np
-        cascade_path = self.cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-        self.detector = self.cv2.CascadeClassifier(cascade_path)
+        self.models_dir = models_dir
+        self.detector_model_path = self._ensure_model_file("face_detection_yunet_2023mar.onnx")
+        self.recognizer_model_path = self._ensure_model_file("face_recognition_sface_2021dec.onnx")
+        self._engine_lock = threading.RLock()
+        self.detector = self._create_detector()
+        self.recognizer = self._create_recognizer()
 
-    def _detect_faces(self, grayscale):
-        attempts = (
-            (grayscale, 1.1, 5, (48, 48)),
-            (grayscale, 1.1, 4, (40, 40)),
-            (self.cv2.equalizeHist(grayscale), 1.1, 4, (36, 36)),
-            (self.cv2.equalizeHist(grayscale), 1.2, 3, (32, 32)),
-        )
-        for image, scale_factor, min_neighbors, min_size in attempts:
-            faces = self.detector.detectMultiScale(
-                image,
-                scaleFactor=scale_factor,
-                minNeighbors=min_neighbors,
-                minSize=min_size,
+    def _ensure_model_file(self, filename: str) -> str:
+        model_path = (self.models_dir / filename).resolve()
+        if not model_path.exists() or not model_path.is_file():
+            raise RuntimeError(
+                f"Modelo obrigatorio ausente: {filename}. "
+                f"Esperado em {model_path}. Copie os modelos para back-end/models."
             )
-            if len(faces) > 0:
-                return faces, image
-        return (), grayscale
+        return str(model_path)
 
-    def _build_vector(self, grayscale_face) -> list[float]:
-        resized = self.cv2.resize(grayscale_face, (32, 32))
-        equalized = self.cv2.equalizeHist(resized)
-        normalized = equalized.astype("float32") / 255.0
+    @staticmethod
+    def _clamp(value: float, low: float, high: float) -> float:
+        return max(low, min(high, value))
 
-        histogram = self.cv2.calcHist([equalized], [0], None, [32], [0, 256]).flatten().astype("float32")
-        hist_norm = histogram.sum()
-        if hist_norm > 0:
-            histogram /= hist_norm
+    def _decode_image(self, image_bytes: bytes):
+        np_buffer = self.np.frombuffer(image_bytes, dtype=self.np.uint8)
+        return self.cv2.imdecode(np_buffer, self.cv2.IMREAD_COLOR)
 
-        small = self.cv2.resize(normalized, (16, 8))
-        grad_x = self.cv2.Sobel(small, self.cv2.CV_32F, 1, 0, ksize=3)
-        grad_y = self.cv2.Sobel(small, self.cv2.CV_32F, 0, 1, ksize=3)
-        gradient = self.np.sqrt((grad_x * grad_x) + (grad_y * grad_y))
-        gradient = gradient / (float(gradient.max()) + 1e-6)
+    def _create_detector(self):
+        try:
+            return self.cv2.FaceDetectorYN.create(
+                self.detector_model_path,
+                "",
+                (320, 320),
+                score_threshold=0.45,
+                nms_threshold=0.3,
+                top_k=5000,
+            )
+        except Exception as exc:
+            raise RuntimeError(f"Falha ao inicializar detector YuNet: {exc}") from exc
 
-        vector = self.np.concatenate([histogram, small.flatten(), gradient.flatten()])
-        return [float(value) for value in vector.tolist()]
+    def _create_recognizer(self):
+        try:
+            return self.cv2.FaceRecognizerSF.create(self.recognizer_model_path, "")
+        except Exception as exc:
+            raise RuntimeError(f"Falha ao inicializar reconhecedor SFace: {exc}") from exc
+
+    def _detect_faces_once(self, image) -> list:
+        if image is None or image.size == 0:
+            return []
+        if not image.flags["C_CONTIGUOUS"]:
+            image = self.np.ascontiguousarray(image)
+        height, width = image.shape[:2]
+        self.detector.setInputSize((int(width), int(height)))
+        _, faces = self.detector.detect(image)
+        if faces is None:
+            return []
+        return [face for face in faces if face is not None and len(face) >= 4]
+
+    def _detect_faces(self, image) -> list:
+        if image is None or image.size == 0:
+            return []
+        with self._engine_lock:
+            try:
+                faces = self._detect_faces_once(image)
+                if faces:
+                    return faces
+
+                # Fallback para imagens escuras/contraste ruim vindas de webcam.
+                enhanced = self.cv2.convertScaleAbs(image, alpha=1.15, beta=12)
+                return self._detect_faces_once(enhanced)
+            except Exception:
+                self.detector = self._create_detector()
+                try:
+                    faces = self._detect_faces_once(image)
+                    if faces:
+                        return faces
+                    enhanced = self.cv2.convertScaleAbs(image, alpha=1.15, beta=12)
+                    return self._detect_faces_once(enhanced)
+                except Exception:
+                    return []
+
+    @staticmethod
+    def _select_largest_face(faces: list):
+        if len(faces) == 0:
+            return None
+        return max(faces, key=lambda face: float(face[2]) * float(face[3]))
+
+    def _crop_with_margin(self, image, face, margin_ratio: float):
+        height, width = image.shape[:2]
+        x = int(face[0])
+        y = int(face[1])
+        w = int(face[2])
+        h = int(face[3])
+        mx = int(w * margin_ratio)
+        my = int(h * margin_ratio)
+        x1 = max(0, x - mx)
+        y1 = max(0, y - my)
+        x2 = min(width, x + w + mx)
+        y2 = min(height, y + h + my)
+        if x2 <= x1 or y2 <= y1:
+            return None
+        return image[y1:y2, x1:x2]
+
+    def _l2_normalize(self, vector):
+        normalized = self.np.asarray(vector, dtype=self.np.float32).flatten()
+        norm = float(self.np.linalg.norm(normalized))
+        if norm > 0:
+            normalized = normalized / norm
+        return normalized
+
+    def _extract_feature(self, image, face):
+        with self._engine_lock:
+            try:
+                aligned = self.recognizer.alignCrop(image, face)
+                return aligned, self.recognizer.feature(aligned)
+            except self.cv2.error:
+                self.recognizer = self._create_recognizer()
+                try:
+                    aligned = self.recognizer.alignCrop(image, face)
+                    return aligned, self.recognizer.feature(aligned)
+                except self.cv2.error:
+                    return None, None
+            except Exception:
+                return None, None
 
     def extract_embedding(self, image_bytes: bytes) -> FaceExtractionResult:
-        np_buffer = self.np.frombuffer(image_bytes, dtype=self.np.uint8)
-        image = self.cv2.imdecode(np_buffer, self.cv2.IMREAD_COLOR)
-        if image is None:
+        try:
+            image = self._decode_image(image_bytes)
+        except Exception:
+            image = None
+        if image is None or image.size == 0:
             return FaceExtractionResult(
                 status=RecognitionStatus.no_face_detected,
                 vector=None,
-                message="A imagem enviada não pode ser lida.",
+                message="A imagem enviada nao pode ser lida.",
                 engine=self.engine_name,
             )
 
-        grayscale = self.cv2.cvtColor(image, self.cv2.COLOR_BGR2GRAY)
-        faces, reference_image = self._detect_faces(grayscale)
-        if len(faces) == 0:
+        faces = self._detect_faces(image)
+        selected_face = self._select_largest_face(faces)
+        if selected_face is None:
             return FaceExtractionResult(
                 status=RecognitionStatus.no_face_detected,
                 vector=None,
@@ -204,54 +225,75 @@ class OpenCvHistogramFaceEngine(BaseFaceEngine):
                 engine=self.engine_name,
             )
 
-        if len(faces) > 1:
-            ordered_faces = sorted(faces, key=lambda face: int(face[2]) * int(face[3]), reverse=True)
-            largest_area = int(ordered_faces[0][2]) * int(ordered_faces[0][3])
-            second_area = int(ordered_faces[1][2]) * int(ordered_faces[1][3])
-            if second_area == 0 or (largest_area / second_area) >= 1.8:
-                faces = [ordered_faces[0]]
-            else:
-                return FaceExtractionResult(
-                    status=RecognitionStatus.multiple_faces_detected,
-                    vector=None,
-                    message="Mais de um rosto foi detectado na imagem enviada.",
-                    engine=self.engine_name,
-                )
-
-        x, y, width, height = [int(value) for value in faces[0]]
-        face_crop = reference_image[y : y + height, x : x + width]
-        if face_crop.size == 0:
+        aligned, feature = self._extract_feature(image, selected_face)
+        if aligned is None or feature is None:
             return FaceExtractionResult(
                 status=RecognitionStatus.no_face_detected,
                 vector=None,
-                message="Não foi possível recortar o rosto detectado.",
+                message="Nao foi possivel gerar o embedding facial.",
                 engine=self.engine_name,
             )
 
-        vector = self._build_vector(face_crop)
+        normalized_feature = self._l2_normalize(feature)
+        vector = [float(value) for value in normalized_feature.tolist()]
+        if not vector:
+            return FaceExtractionResult(
+                status=RecognitionStatus.no_face_detected,
+                vector=None,
+                message="Nao foi possivel gerar o embedding facial.",
+                engine=self.engine_name,
+            )
+
+        face_area = max(1.0, float(selected_face[2]) * float(selected_face[3]))
+        frame_area = max(1.0, float(image.shape[0]) * float(image.shape[1]))
+        area_ratio = self._clamp(face_area / frame_area, 0.0, 1.0)
+        face_crop = self._crop_with_margin(image, selected_face, margin_ratio=0.35)
+        if face_crop is None or face_crop.size == 0:
+            face_crop = image
+        gray = self.cv2.cvtColor(face_crop, self.cv2.COLOR_BGR2GRAY)
+        sharpness = float(self.cv2.Laplacian(gray, self.cv2.CV_32F).var())
+        sharpness_score = self._clamp(sharpness / 220.0, 0.0, 1.0)
+        det_score = float(selected_face[14]) if len(selected_face) > 14 else 0.5
+        quality_score = self._clamp((area_ratio * 0.35) + (sharpness_score * 0.4) + (det_score * 0.25), 0.0, 1.0)
+
+        cropped_image_bytes: bytes | None = None
+        try:
+            encoded_crop_ok, encoded_crop = self.cv2.imencode(".jpg", face_crop)
+            if encoded_crop_ok:
+                cropped_image_bytes = bytes(encoded_crop.tobytes())
+        except Exception:
+            cropped_image_bytes = None
+
+        normalized_image_bytes: bytes | None = None
+        try:
+            encoded_ok, encoded = self.cv2.imencode(".jpg", aligned)
+            if encoded_ok:
+                normalized_image_bytes = bytes(encoded.tobytes())
+        except Exception:
+            normalized_image_bytes = None
+
         return FaceExtractionResult(
             status=RecognitionStatus.success,
             vector=vector,
-            message="Embedding visual gerado com OpenCV.",
+            message="Embedding facial gerado com pipeline NAOGAZEI.",
             engine=self.engine_name,
+            quality_score=quality_score,
+            cropped_image_bytes=cropped_image_bytes,
+            normalized_image_bytes=normalized_image_bytes,
         )
 
 
-def build_face_engine(engine_name: str) -> BaseFaceEngine:
+def build_face_engine(engine_name: str, *, models_dir: Path | None = None) -> BaseFaceEngine:
     normalized = engine_name.casefold().strip()
     if normalized == "mock":
         return MockFaceEngine()
-    if normalized == "face_recognition":
-        try:
-            return FaceRecognitionLibraryEngine()
-        except Exception:
-            return OpenCvHistogramFaceEngine()
-    if normalized == "opencv":
-        return OpenCvHistogramFaceEngine()
 
-    for candidate in (FaceRecognitionLibraryEngine, OpenCvHistogramFaceEngine, MockFaceEngine):
-        try:
-            return candidate()
-        except Exception:
-            continue
-    return MockFaceEngine()
+    if normalized in {"naogazei_face", "naogazei", "sface_yunet", "sface", "yunet", "auto"}:
+        if models_dir is None:
+            raise RuntimeError("Diretorio de modelos nao informado para engine naogazei_face.")
+        return NaoGazeiFaceEngine(models_dir)
+
+    raise ValueError(
+        f"Engine facial nao suportada: '{engine_name}'. "
+        "Use 'naogazei_face' (producao) ou 'mock' (testes)."
+    )

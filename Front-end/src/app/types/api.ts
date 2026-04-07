@@ -215,3 +215,15 @@ export type PermissionsSettingsResponse = {
 export type PermissionsEffectiveResponse = {
   modules: PermissionMap;
 };
+
+export type EmbeddingsRebuildStatus = {
+  running: boolean;
+  total_students: number;
+  processed_students: number;
+  total_samples: number;
+  processed_samples: number;
+  failed_students: number;
+  started_at: string | null;
+  finished_at: string | null;
+  last_error: string | null;
+};
