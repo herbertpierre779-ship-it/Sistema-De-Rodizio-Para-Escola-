@@ -10,7 +10,7 @@ Projeto full stack para operacao de refeicoes escolares com cadastro de alunos, 
 
 ## Status do Projeto
 
-Em desenvolvimento
+finalizado 
 
 ## Como rodar (novo ambiente)
 
