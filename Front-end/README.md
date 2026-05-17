@@ -1,81 +1,43 @@
-# 🍽️ Front-end — Sistema de Rodízio de Almoço
+# Front-end - Cantina
 
-## 📖 Sobre
+Aplicacao web React + Vite do sistema da cantina.
 
-Este é o **front-end web** do sistema da cantina escolar.  
-Aqui ficam as telas de:
+## Requisitos
 
-- Operação de reconhecimento
-- Cadastro de aluno
-- Turmas
-- Estatísticas
-- Configuração e permissões
+- Node.js 20+
+- Backend rodando em `http://127.0.0.1:8000` (padrao do proxy do Vite)
 
----
-
-## 🛠️ Tecnologias Utilizadas
-
-- ⚛️ **React**
-- 🧠 **TypeScript**
-- ⚡ **Vite**
-- 🎨 **Tailwind CSS**
-- ✅ **Vitest** (testes)
-
----
-
-## 🚀 Como executar
+## Setup local
 
 ```bash
 cd Front-end
 npm install
+copy .env.example .env
+```
+
+Se quiser usar o proxy local do Vite, deixe `VITE_API_URL` vazio no `.env`.
+
+## Executar
+
+```bash
+cd Front-end
 npm run dev
 ```
 
-Quando estiver rodando localmente, por padrão a aplicação roda em:
+Quando estiver rodando localmente:
 
-- `http://localhost:5173`
+- App: `http://localhost:5173`
 
----
-
-## 🔧 Build de produção
+## Build
 
 ```bash
 cd Front-end
 npm run build
 ```
 
-Saída gerada em:
-
-- `Front-end/dist`
-
----
-
-## 🧪 Testes
+## Testes
 
 ```bash
 cd Front-end
 npm test -- --run
 ```
-
----
-
-## 🗂️ Estrutura (resumo)
-
-- `src/app/pages` → páginas principais
-- `src/app/components` → componentes e painéis
-- `src/app/lib` → API, utilitários e regras de front
-- `src/app/providers` → autenticação e feedback global
-- `tests` → testes complementares
-
----
-
-## 📌 Observações
-
-- Este front depende do backend em execução.
-- O arquivo `.env.example` pode ser usado como base para configuração local.
-
----
-
-## 🚧 Status do Front-end
-
-🚧 Em desenvolvimento contínuo

@@ -1,119 +1,49 @@
-# 🍽️ Back-end — Sistema de Rodízio de Almoço
+# Back-end - Cantina
 
-## 📖 Sobre
+API em FastAPI para autenticacao, cadastro, reconhecimento facial, operacao e estatisticas.
 
-Este é o **back-end da API** do sistema da cantina escolar.  
-Ele centraliza:
+## Requisitos
 
-- autenticação de usuários
-- cadastro de alunos e turmas
-- matrícula facial (3 fotos ou 50 fotos)
-- reconhecimento facial e validação por CPF
-- registro de refeições e bloqueio de duplicidade
-- estatísticas e configurações do sistema
+- Python 3.11+
+- Modelos ONNX em `back-end/models`:
+  - `face_detection_yunet_2023mar.onnx`
+  - `face_recognition_sface_2021dec.onnx`
 
----
+Importante: sem esses 2 arquivos, a API sobe com erro (fail-fast), por seguranca.
 
-## 🛠️ Tecnologias Utilizadas
-
-- 🐍 **Python 3.11+**
-- ⚡ **FastAPI**
-- 🧩 **Pydantic**
-- 🔐 **JWT (Bearer Token)**
-- 🗄️ **SQLite** (dados principais)
-- 🧾 **JSON** (`meal_entries` e `recognition_attempts`)
-- ✅ **Pytest** (testes)
-
----
-
-## 🚀 Como executar
+## Setup local
 
 ```bash
 cd back-end
 python -m venv .venv
 .venv\Scripts\activate
-pip install -r requirements.txt
-pip install -r requirements-face.txt
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
+
+Criar `.env` a partir do exemplo:
+
+```bash
+copy .env.example .env
+```
+
+## Executar
+
+```bash
+cd back-end
+.venv\Scripts\activate
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-Quando estiver rodando localmente, a API fica disponível em:
+Quando estiver rodando localmente:
 
-- `http://localhost:8000`
+- API: `http://localhost:8000`
+- Docs: `http://localhost:8000/docs`
 
-Documentação automática local:
-
-- `http://localhost:8000/docs`
-
----
-
-## 🗂️ Estrutura (resumo)
-
-- `app/api/routes` → rotas HTTP
-- `app/schemas` → contratos de request/response
-- `app/services` → regras de negócio
-- `app/repositories` → contratos de persistência
-- `app/adapters/persistence` → SQLite + JSON stores/repositories
-- `app/core` → config, container, segurança e utilitários
-- `tests` → testes automatizados da API
-
----
-
-## 🧠 Persistência atual
-
-- **SQLite (`cantina.db`)**:
-  - usuários
-  - turmas
-  - alunos
-  - embeddings faciais
-  - configurações (`app_settings`)
-
-- **JSON dedicado**:
-  - `back-end/data/meal_entries.json` (entradas/atendimentos)
-  - `back-end/data/recognition_attempts.json` (tentativas de reconhecimento)
-
----
-
-## ⚙️ Variáveis principais
-
-Use o `.env.example` como base.  
-As mais usadas:
-
-- `CANTINA_DATABASE_FILE`
-- `CANTINA_MEAL_ENTRIES_FILE`
-- `CANTINA_RECOGNITION_ATTEMPTS_FILE`
-- `CANTINA_PHOTOS_ROOT`
-- `CANTINA_BOOTSTRAP_DIRECTOR_USERNAME`
-- `CANTINA_BOOTSTRAP_DIRECTOR_PASSWORD`
-- `CANTINA_BOOTSTRAP_DIRECTOR_FULL_NAME`
-- `CANTINA_SCHOOL_TIMEZONE`
-
----
-
-## 🧪 Testes
+## Testes
 
 ```bash
 cd back-end
+.venv\Scripts\activate
 python -m pytest
 ```
-
-Checagem de sintaxe:
-
-```bash
-cd back-end
-python -m compileall app
-```
-
----
-
-## 📌 Observações
-
-- O reconhecimento continua funcional em modo fallback quando o engine principal não está disponível.
-- O diretório de fotos é organizado por `ano/turma/nome-do-aluno`.
-- Endpoints e contratos públicos foram mantidos compatíveis durante as mudanças recentes.
-
----
-
-## 🚧 Status do Back-end
-
-🚧 Em desenvolvimento

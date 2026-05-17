@@ -1,84 +1,55 @@
-# 🍽️ Sistema de Rodízio de Almoço
+# Sistema de Rodizio de Almoco - Cantina
 
-## 📖 Sobre o Projeto
+Projeto full stack para operacao de refeicoes escolares com cadastro de alunos, reconhecimento facial, validacao por CPF, permissao por perfil e estatisticas.
 
-Este projeto tem como objetivo desenvolver um **sistema web de controle de rodízio de turmas no horário de almoço**, trazendo mais organização, controle e eficiência para o ambiente escolar.
+## Tecnologias Utilizadas
 
-A aplicação permite gerenciar a ordem das turmas diariamente, garantindo que cada aluno respeite sua vez e evitando desorganização nas filas.
+- Front-end: React + TypeScript + Vite + Tailwind CSS
+- Back-end: Python + FastAPI + Pydantic
+- Persistencia: SQLite + JSON
 
----
+## Status do Projeto
 
-## 🎯 Objetivos
+Em desenvolvimento
 
-- 📌 Organizar o rodízio de turmas  
-- 📌 Controlar a ordem de entrada no almoço  
-- 📌 Evitar filas desorganizadas  
-- 📌 Bloquear alunos fora da sua vez  
-- 📌 Gerar dados para auditoria e análise  
+## Como rodar (novo ambiente)
 
----
+1. Clone o repositorio.
+2. Configure e suba o back-end (detalhes em `back-end/README.md`).
+3. Configure e suba o front-end (detalhes em `Front-end/README.md`).
 
-## ⚙️ Funcionalidades 
+Resumo rapido:
 
-  ### 🔄 Sistema de Rodízio
+```bash
+# backend
+cd back-end
+python -m venv .venv
+.venv\Scripts\activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+copy .env.example .env
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+```
 
-  ### 🚫 Controle de Alunos
+```bash
+# frontend
+cd Front-end
+npm install
+copy .env.example .env
+npm run dev
+```
 
-  ### 📊 Auditoria (Direção)
----
+## Modelos faciais obrigatorios
 
-## 👥 Equipe do Projeto
+Coloque estes arquivos em `back-end/models`:
 
-- 👨‍💼 **Direção:** Jair  
-- 👨‍🏫 **Orientador:** Laercio  
-- 💻 **Back-end:** Pierre  
-- 🗄️ **Banco de Dados:** Marcelo/Jose wendson 
-- 🎨 **Front-end:** Paulo
+- `face_detection_yunet_2023mar.onnx`
+- `face_recognition_sface_2021dec.onnx`
 
----
+Sem esses modelos, o back-end nao inicia (comportamento esperado).
 
-## 🗂️ Estrutura do Projeto
-📂 Front-end
-└── Interface web (HTML e CSS)
+## Documentacao local
 
-📂 back-end
-└── Lógica do sistema em Python
-
-📂 banco de dados
-└── SQLite (gerenciado com Python)
-
-📂 fotos
-└── Armazenamento de imagens
-
-📂 ano
-
-📂 turma
-
-📂 [nome]
-
-
-
-
----
-
-## 🛠️ Tecnologias Utilizadas
-
-- 🌐 **Front-end:** React + TypeScript + Vite + Tailwind CSS  
-- ⚙️ **Back-end:** Python + FastAPI + Pydantic  
-- 🗄️ **Persistência de Dados:** SQLite + JSON 
-
----
-
-## 🚀 Status do Projeto
-
-🚧 Em desenvolvimento 
-
----
-
-## 📌 Observações
-
-Este projeto foi idealizado para resolver um problema real de organização escolar, servindo também como prática de desenvolvimento full stack.
-
----
-
-⭐ Se você gostou do projeto, deixe uma estrela no repositório!
+- API: `http://localhost:8000`
+- Swagger: `http://localhost:8000/docs`
+- Front-end: `http://localhost:5173`
